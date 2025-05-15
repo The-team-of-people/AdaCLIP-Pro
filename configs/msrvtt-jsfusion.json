@@ -1,9 +1,11 @@
 {
+    "frame_agg": "mlp",
+    "frame_agg_temp": 1.0,
     "dataset": "msrvtt",
     "train_annot": "annots/msrvtt-jsfusion/train.json",
     "val_annot": "annots/msrvtt-jsfusion/val.json",
     "test_annot": "annots/msrvtt-jsfusion/val.json",
-    "frames_dir": "data/MSRVTT/frames",
+    "frames_dir": "/data/MSRVTT/frames",
     "concat_captions": "indep-one",
     "max_txt_len": 32,
     "num_frm": 16,
