@@ -1,0 +1,9 @@
+05/14/2025 17:47:18 - INFO - __main__ -   Setup model...
+05/14/2025 17:47:19 - INFO - __main__ -   Loading model checkpoint: D:/GitCode/AdaCLIP/checkpoints/msrvtt/trained_model.pth...
+05/14/2025 17:47:27 - INFO - __main__ -   Setup model done!
+05/14/2025 17:47:30 - INFO - __main__ -   gflops_table: 
+05/14/2025 17:47:30 - INFO - __main__ -   clip/f              : 4.4111 GFLOPS
+05/14/2025 17:47:30 - INFO - __main__ -   policy/v            : 3.6332 GFLOPS
+05/14/2025 17:47:30 - INFO - __main__ -   transformer/v       : 0.0611 GFLOPS
+05/14/2025 17:47:30 - INFO - __main__ -   mlp/v               : 0.0084 GFLOPS
+05/14/2025 17:47:30 - INFO - __main__ -   Init. train_loader and val_loader...
