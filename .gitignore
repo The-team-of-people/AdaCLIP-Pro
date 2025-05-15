@@ -1,16 +1,3 @@
-/annot_preprocess/
-/annots/
-/checkpoints/
-/configs/
-/data/
-/datasets/
-/images/
-/modeling/
-/optimization/
-/output/
-/scripts/
-/tensorboard/
-/utils/
 # 忽略 data 下所有文件，但保留 .gitkeep
 data/**/*
 !data/**/.gitkeep
