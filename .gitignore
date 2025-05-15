@@ -1,0 +1,13 @@
+/annot_preprocess/
+/annots/
+/checkpoints/
+/configs/
+/data/
+/datasets/
+/images/
+/modeling/
+/optimization/
+/output/
+/scripts/
+/tensorboard/
+/utils/
