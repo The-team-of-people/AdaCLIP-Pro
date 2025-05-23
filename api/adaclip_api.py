@@ -22,11 +22,14 @@ def get_frames_root():
         settings = json.load(f)
     return settings["frames_addr"]
 
+
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))           # 当前文件所在目录【如 api/ 】
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))   # 项目根目录
 FRAMES_ROOT = get_frames_root()
-IMG_TMPL = "image_{:05d}.jpg"
-CKPT_PATH = "checkpoints/msrvtt/trained_model.pth"
-CONFIG_PATH = "configs/msrvtt-jsfusion.json"
-EMBS_OUTPUT_ROOT = "data/application"
+IMG_TMPL = "image_%05d.jpg"
+CKPT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "msrvtt", "trained_model.pth")
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "msrvtt-jsfusion.json")
+EMBS_OUTPUT_ROOT = os.path.join(PROJECT_ROOT, "data", "application")
 # -----------------------------------
 
 def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, frame_size=-1):
@@ -65,6 +68,10 @@ def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, f
             else:
                 frame_size_str = f"-vf scale={frame_size}:-1"
         cmd = f'ffmpeg -nostats -loglevel 0 -i "{video_path}" -q:v 2 {frame_size_str} {frame_rate_str} "{dst_directory_path}/{prefix}"'
+        print(f"[DEBUG] Running ffmpeg: {cmd}")
+        ret = subprocess.call(cmd, shell=True)
+        if ret != 0:
+            print(f"[ERROR] ffmpeg failed for {video_path}, return code: {ret}")
         subprocess.call(cmd, shell=True)
 
 def save_embeddings_per_video(embs_dir, vids, embs):
@@ -119,8 +126,8 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
         model.float()
     model.eval()
 
-    preprocess = BaseDataset(cfg, "annots/empty.json", is_train=False).clip_preprocess
-
+    annots_path = os.path.join(PROJECT_ROOT, "annots", "empty.json")
+    preprocess = BaseDataset(cfg, annots_path, is_train=False).clip_preprocess
     all_pairs = []
     save_cnt = 0
     from joblib import Parallel, delayed
@@ -133,7 +140,7 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
         idxs = np.linspace(0, len(files) - 1, num=num_frm, dtype=int)
         imgs = []
         for idx in idxs:
-            path = os.path.join(frame_dir, img_tmpl.format(idx + 1))
+            path = os.path.join(frame_dir, img_tmpl % (idx + 1))
             if not os.path.exists(path):
                 return None, vid, f"Missing frame {path}"
             try:
@@ -393,9 +400,12 @@ def videoQuery(dictory_addrs, message, device="cuda"):
     tokens_tensor = torch.zeros((1, cfg.max_txt_len), dtype=torch.int64)
     tokens_tensor[0, :len(tokens)] = torch.tensor(tokens)
     tokens_tensor = tokens_tensor.to(device_obj)
+    if tokens_tensor.ndim == 2:
+        tokens_tensor = tokens_tensor.unsqueeze(1)  # [1, 1, max_txt_len]
     with torch.no_grad():
         text_feat = model.get_text_output(tokens_tensor)
-        text_feat = model.text_transformation(text_feat)
+        if isinstance(text_feat, tuple):
+            text_feat = text_feat[0]
         text_feat = text_feat.cpu().numpy().reshape(-1)
 
     # 3. 检索
