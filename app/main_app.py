@@ -5,14 +5,21 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QVBoxLayout,
     QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
     QAbstractItemView, QSplitter, QStackedWidget, QCheckBox, QMessageBox, QHeaderView, QStatusBar,
-    QFrame, QDialog
+    QFrame, QDialog, QGroupBox, QGridLayout, QProgressBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QPalette, QColor
-from PyQt6.QtGui import QIcon
 
-SETTINGS_FILE = "settings.json"
-HISTORY_FILE = "history.json"
+# 引入接口
+from api.adaclip_api import (
+    uploadDirectory, videoQuery, scanAndCheckDictory,
+    addVideoToDictory, deleteVideo
+)
+
+
+BASE_DIR = os.path.dirname(__file__)  # 获取当前脚本所在目录
+SETTINGS_FILE = os.path.join(BASE_DIR, "user_data", "settings.json")  # 相对路径
+HISTORY_FILE = os.path.join(BASE_DIR, "user_data", "history.json")     # 相对路径
 
 
 def get_style():
@@ -53,7 +60,16 @@ def get_style():
     QStatusBar {
         background-color: #E3F2FD;
     }
+    QProgressBar {
+        border: 1px solid grey;
+        border-radius: 3px;
+        text-align: center;
+    }
+    QProgressBar::chunk {
+        background-color: #2196F3;
+    }
     """
+
 
 
 def open_path(path):
@@ -68,16 +84,108 @@ def open_path(path):
 
 
 class UploadThread(QThread):
-    done = pyqtSignal(str)
+    progress_updated = pyqtSignal(str, int, str)  # 文件夹路径, 进度百分比, 状态消息
+    task_completed = pyqtSignal(str, str)  # 文件夹路径, 最终结果
 
     def __init__(self, folder):
         super().__init__()
         self.folder = folder
 
     def run(self):
-        print(f"后台上传处理中: {self.folder}")
-        self.sleep(2)  # 模拟耗时
-        self.done.emit(self.folder + " 上传处理完成")
+        try:
+            # 调用后端上传目录接口
+
+            result = uploadDirectory(self.folder)
+
+            if result.get("success"):
+                self.progress_updated.emit(self.folder, 100, "处理完成")
+                self.task_completed.emit(self.folder, result)
+            else:
+                self.progress_updated.emit(self.folder, 100, f"处理失败: {result.get('msg', '未知错误')}")
+                self.task_completed.emit(self.folder, {"success": False, "msg": result.get('msg', '未知错误')})
+
+        except Exception as e:
+            self.progress_updated.emit(self.folder, 100, f"处理异常: {str(e)}")
+            self.task_completed.emit(self.folder, {"success": False, "msg": str(e)})
+
+
+class ProgressMonitor(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("上传进度监控")
+        self.setMinimumWidth(600)
+        self.setStyleSheet(get_style())
+
+        self.layout = QVBoxLayout(self)
+        self.task_widgets = {}  # 存储每个任务的UI组件
+
+        # 添加关闭按钮
+        btn_layout = QHBoxLayout()
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.hide)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+
+        self.layout.addLayout(btn_layout)
+
+    def add_task(self, folder):
+        # 为每个任务创建一个分组框
+        group_box = QGroupBox(f"处理: {os.path.basename(folder)}")
+        group_box.setStyleSheet("QGroupBox { border: 1px solid #ddd; border-radius: 5px; margin-top: 10px; }")
+
+        task_layout = QGridLayout()
+
+        # 显示文件夹路径
+        path_label = QLabel(f"路径: {folder}")
+        path_label.setWordWrap(True)
+
+        # 进度条
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+
+        # 状态标签
+        status_label = QLabel("等待中...")
+
+        # 添加到布局
+        task_layout.addWidget(QLabel("状态:"), 0, 0)
+        task_layout.addWidget(status_label, 0, 1)
+        task_layout.addWidget(QLabel("进度:"), 1, 0)
+        task_layout.addWidget(progress_bar, 1, 1)
+        task_layout.addWidget(path_label, 2, 0, 1, 2)
+
+        group_box.setLayout(task_layout)
+        self.layout.insertWidget(self.layout.count() - 1, group_box)  # 插入到关闭按钮之前
+
+        # 保存UI组件引用
+        self.task_widgets[folder] = {
+            "group_box": group_box,
+            "progress_bar": progress_bar,
+            "status_label": status_label
+        }
+
+        self.show()
+
+    def update_progress(self, folder, progress, status):
+        if folder in self.task_widgets:
+            self.task_widgets[folder]["progress_bar"].setValue(progress)
+            self.task_widgets[folder]["status_label"].setText(status)
+
+    def complete_task(self, folder, result):
+        if folder in self.task_widgets:
+            self.task_widgets[folder]["status_label"].setText(f"✓ {result}")
+            self.task_widgets[folder]["progress_bar"].setValue(100)
+            # 设置为绿色完成状态
+            self.task_widgets[folder]["progress_bar"].setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid grey;
+                    border-radius: 3px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: #4CAF50;
+                }
+            """)
 
 
 class MainWindow(QMainWindow):
@@ -89,6 +197,9 @@ class MainWindow(QMainWindow):
         self.resize(1024, 700)
         self.selected_search_dirs = []
         self.processed_dirs = []
+        self.upload_threads = {}  # 存储所有上传线程
+        self.progress_monitor = None  # 进度监控窗口
+
 
         # 设置全局样式
         self.setStyleSheet(get_style())
@@ -265,9 +376,43 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
         if folder:
             self.statusBar().showMessage("正在上传处理...")
-            self.upload_thread = UploadThread(folder)
-            self.upload_thread.done.connect(self.on_upload_done)
-            self.upload_thread.start()
+
+            # 创建进度监控窗口(如果不存在)
+            if not self.progress_monitor:
+                self.progress_monitor = ProgressMonitor(self)
+
+            # 添加新任务到监控窗口
+            self.progress_monitor.add_task(folder)
+
+            # 创建并启动上传线程
+            thread = UploadThread(folder)
+            self.upload_threads[folder] = thread
+
+            # 连接信号
+            thread.progress_updated.connect(self.update_progress)
+            thread.task_completed.connect(self.on_task_completed)
+
+            thread.start()
+
+    def update_progress(self, folder, progress, status):
+        if self.progress_monitor:
+            self.progress_monitor.update_progress(folder, progress, status)
+
+    def on_task_completed(self, folder, result):
+        if folder in self.upload_threads:
+            # 从线程列表中移除已完成的线程
+            self.upload_threads[folder].deleteLater()
+            del self.upload_threads[folder]
+
+        # 更新进度窗口
+        if self.progress_monitor:
+            self.progress_monitor.complete_task(folder, result)
+
+        # 添加到已处理目录列表
+        self.processed_dirs.append(folder)
+        self.statusBar().showMessage(f"{folder} 处理完成", 3000)
+
+    # 其他方法保持不变...
 
     def on_upload_done(self, msg):
         print(msg)
@@ -288,7 +433,8 @@ class MainWindow(QMainWindow):
         if not text or not self.selected_search_dirs:
             QMessageBox.warning(self, "提示", "请输入搜索内容并选择文件夹！")
             return
-
+        # 这里添加搜索逻辑
+        # 输出一个包含文件信息的列表
         print(f"搜索文本: {text}")
         print(f"搜索路径: {self.selected_search_dirs}")
 
@@ -319,7 +465,7 @@ class MainWindow(QMainWindow):
         if folder:
             self.folder_path_edit.setText(folder)
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"folder": folder}, f, ensure_ascii=False, indent=2)
+                json.dump({"frames_addr": folder}, f, ensure_ascii=False, indent=2)
             self.statusBar().showMessage(f"设置已保存: {folder}", 3000)
 
     def load_history(self):
