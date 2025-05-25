@@ -1,8 +1,8 @@
 import sys
 import os
 import json
-from datetime import datetime
-from pathlib import Path
+import traceback
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QVBoxLayout,
     QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
@@ -11,22 +11,18 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QPalette, QColor
-from PyQt6.QtGui import QIcon
 
-# 确保必要的目录和文件存在
-os.makedirs("user_data", exist_ok=True)
-SETTINGS_FILE = os.path.join("user_data", "settings.json")
-HISTORY_FILE = os.path.join("user_data", "history.json")
+# 引入接口
+from api.adaclip_api import (
+    uploadDirectory, videoQuery, scanAndCheckDictory,
+    addVideoToDictory, deleteVideo
+)
 
-# 如果设置文件不存在，创建默认设置
-if not os.path.exists(SETTINGS_FILE):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"processed_dirs": []}, f, ensure_ascii=False, indent=2)
 
-# 如果历史文件不存在，创建默认历史记录
-if not os.path.exists(HISTORY_FILE):
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump({"records": []}, f, ensure_ascii=False, indent=2)
+BASE_DIR = os.path.dirname(__file__)  # 获取当前脚本所在目录
+SETTINGS_FILE = os.path.join(BASE_DIR, "user_data", "settings.json")  # 相对路径
+HISTORY_FILE = os.path.join(BASE_DIR, "user_data", "history.json")     # 相对路径
+
 
 def get_style():
     return """
@@ -88,90 +84,10 @@ def open_path(path):
     except Exception as e:
         QMessageBox.warning(None, "错误", f"打开失败: {str(e)}")
 
-#这里FileProcessor类负责处理文件夹中的文件，提取文件信息并保存到JSON文件中。
-class FileProcessor:
-    def __init__(self):
-        self.processed_files = {}
-        self.user_data_dir = Path("user_data")
-        self.user_data_dir.mkdir(exist_ok=True)
-        self.upload_info_file = self.user_data_dir / "uploaded_directory.json"
-        self.load_processed_files()
-
-    def load_processed_files(self):
-        if self.upload_info_file.exists():
-            try:
-                with open(self.upload_info_file, "r", encoding="utf-8") as f:
-                    self.processed_files = json.load(f)
-            except:
-                self.processed_files = {}
-
-    def save_processed_files(self):
-        with open(self.upload_info_file, "w", encoding="utf-8") as f:
-            json.dump(self.processed_files, f, ensure_ascii=False, indent=2)
-
-    def process_folder(self, folder_path):
-        """处理文件夹中的所有文件"""
-        folder_path = Path(folder_path)
-        files_info = {}
-        
-        for file_path in folder_path.rglob("*"):
-            if file_path.is_file():
-                stat = file_path.stat()
-                files_info[str(file_path)] = {
-                    "name": file_path.name,
-                    "size": self.format_size(stat.st_size),
-                    "mtime": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "path": str(file_path),
-                    "content_type": self.get_content_type(file_path)
-                }
-        
-        self.processed_files[str(folder_path)] = {
-            "files": files_info,
-            "processed_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        self.save_processed_files()
-        return len(files_info)
-
-    def search_files(self, search_text, search_dirs):
-        """搜索文件"""
-        results = []
-        search_text = search_text.lower()
-        
-        for dir_path in search_dirs:
-            if dir_path not in self.processed_files:
-                continue
-                
-            for file_info in self.processed_files[dir_path]["files"].values():
-                if (search_text in file_info["name"].lower() or
-                    search_text in str(file_info["path"]).lower()):
-                    results.append(file_info)
-                    
-        return results
-
-    @staticmethod
-    def format_size(size):
-        """格式化文件大小"""
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size < 1024:
-                return f"{size:.2f}{unit}"
-            size /= 1024
-        return f"{size:.2f}TB"
-
-    @staticmethod
-    def get_content_type(file_path):
-        """获取文件类型"""
-        ext = file_path.suffix.lower()
-        if ext in ['.mp4', '.avi', '.mov', '.mkv']:
-            return "视频"
-        elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
-            return "图片"
-        elif ext in ['.doc', '.docx', '.pdf', '.txt']:
-            return "文档"
-        else:
-            return "其他"
 
 class UploadThread(QThread):
-    done = pyqtSignal(str, bool, str)  # 文件夹路径, 是否成功, 消息
+    progress_updated = pyqtSignal(str, int, str)  # 文件夹路径, 进度百分比, 状态消息
+    task_completed = pyqtSignal(str, str)  # 文件夹路径, 最终结果
 
     def __init__(self, folder):
         super().__init__()
@@ -179,28 +95,119 @@ class UploadThread(QThread):
 
     def run(self):
         try:
-            # 调用API处理视频
+            # 调用后端上传目录接口
+
             result = uploadDirectory(self.folder)
-            if result["success"]:
-                self.done.emit(self.folder, True, result["msg"])
+
+            if result.get("success"):
+                self.progress_updated.emit(self.folder, 100, "处理完成")
+                self.task_completed.emit(self.folder, result.get('msg', '处理完成'))
             else:
-                self.done.emit(self.folder, False, result["msg"])
+                self.progress_updated.emit(self.folder, 100, f"处理失败: {result.get('msg', '未知错误')}")
+                self.task_completed.emit(self.folder, result)  # 直接传递字典
+
         except Exception as e:
-            self.done.emit(self.folder, False, str(e))
+            print(f"UploadThread 异常: {type(e).__name__}, 信息: {str(e)}")
+            traceback.print_exc()  # 需要导入 traceback
+            self.progress_updated.emit(self.folder, 100, f"处理异常: {str(e)}")
+            self.task_completed.emit(self.folder, {"success": False, "msg": str(e)})
+
+
+class ProgressMonitor(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("上传进度监控")
+        self.setMinimumWidth(600)
+        self.setStyleSheet(get_style())
+
+        self.layout = QVBoxLayout(self)
+        self.task_widgets = {}  # 存储每个任务的UI组件
+
+        # 添加关闭按钮
+        btn_layout = QHBoxLayout()
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.hide)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+
+        self.layout.addLayout(btn_layout)
+
+    def add_task(self, folder):
+        # 为每个任务创建一个分组框
+        group_box = QGroupBox(f"处理: {os.path.basename(folder)}")
+        group_box.setStyleSheet("QGroupBox { border: 1px solid #ddd; border-radius: 5px; margin-top: 10px; }")
+
+        task_layout = QGridLayout()
+
+        # 显示文件夹路径
+        path_label = QLabel(f"路径: {folder}")
+        path_label.setWordWrap(True)
+
+        # 进度条
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+
+        # 状态标签
+        status_label = QLabel("等待中...")
+
+        # 添加到布局
+        task_layout.addWidget(QLabel("状态:"), 0, 0)
+        task_layout.addWidget(status_label, 0, 1)
+        task_layout.addWidget(QLabel("进度:"), 1, 0)
+        task_layout.addWidget(progress_bar, 1, 1)
+        task_layout.addWidget(path_label, 2, 0, 1, 2)
+
+        group_box.setLayout(task_layout)
+        self.layout.insertWidget(self.layout.count() - 1, group_box)  # 插入到关闭按钮之前
+
+        # 保存UI组件引用
+        self.task_widgets[folder] = {
+            "group_box": group_box,
+            "progress_bar": progress_bar,
+            "status_label": status_label
+        }
+
+        self.show()
+
+    def update_progress(self, folder, progress, status):
+        if folder in self.task_widgets:
+            self.task_widgets[folder]["progress_bar"].setValue(progress)
+            self.task_widgets[folder]["status_label"].setText(status)
+
+    def complete_task(self, folder, result):
+        if folder in self.task_widgets:
+            self.task_widgets[folder]["status_label"].setText(f"✓ {result}")
+            self.task_widgets[folder]["progress_bar"].setValue(100)
+            # 设置为绿色完成状态
+            self.task_widgets[folder]["progress_bar"].setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid grey;
+                    border-radius: 3px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: #4CAF50;
+                }
+            """)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+
         self.setWindowTitle("文影灵搜")
+        # self.setWindowIcon(QIcon("prime_search.png"))  # 替换为你的PNG路径
         self.resize(1024, 700)
         self.selected_search_dirs = []
         self.processed_dirs = []
-        # 添加文件处理器实例
-        self.file_processor = FileProcessor()  # 添加这一行
+        self.upload_threads = {}  # 存储所有上传线程
+        self.progress_monitor = None  # 进度监控窗口
+
 
         # 设置全局样式
         self.setStyleSheet(get_style())
-        
+
         # 主分割器
         main_widget = QWidget()
         main_layout = QHBoxLayout(main_widget)
@@ -321,59 +328,6 @@ class MainWindow(QMainWindow):
         widget.setLayout(layout)
         return widget
 
-    def show_main(self):
-        """显示主页面"""
-        self.stacked_widget.setCurrentIndex(0)
-        self.statusBar().showMessage("主页")
-
-    def show_settings(self):
-        """显示设置页面"""
-        self.stacked_widget.setCurrentIndex(1)
-        self.statusBar().showMessage("设置")
-
-    def show_history(self):
-        """显示历史记录页面"""
-        self.stacked_widget.setCurrentIndex(2)
-        self.load_history()  # 加载历史记录
-        self.statusBar().showMessage("历史记录")
-
-    def load_history(self):
-        """加载历史记录"""
-        self.history_list.clear()
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-                    for record in history.get("records", []):
-                        text = record["text"]
-                        time = record["time"]
-                        item = QListWidgetItem(f"{time} - {text}")
-                        item.setData(Qt.UserRole, record)  # 存储完整记录数据
-                        self.history_list.addItem(item)
-            except Exception as e:
-                print(f"加载历史记录失败: {e}")
-
-    def open_history_item(self, item):
-        """打开历史记录项"""
-        record = item.data(Qt.UserRole)
-        if record and "files" in record:
-            if not record["files"]:
-                QMessageBox.information(self, "提示", "该记录没有关联文件")
-                return
-            
-            # 显示文件列表对话框
-            dlg = QDialog(self)
-            dlg.setWindowTitle("历史记录文件")
-            layout = QVBoxLayout(dlg)
-            
-            list_widget = QListWidget()
-            for file_path in record["files"]:
-                list_widget.addItem(QListWidgetItem(file_path))
-            list_widget.itemDoubleClicked.connect(lambda item: open_path(item.text()))
-            
-            layout.addWidget(list_widget)
-            dlg.exec_()
-
     def build_settings_page(self):
         widget = QWidget()
         layout = QVBoxLayout()
@@ -424,18 +378,57 @@ class MainWindow(QMainWindow):
     # -- 事件处理函数 --
     def upload_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
+        if folder in self.upload_threads:
+            QMessageBox.warning(self, "提示", "该文件夹正在处理中，请等待完成！")
+            return
+        if folder in self.processed_dirs:
+            QMessageBox.warning(self, "提示", "该文件夹已处理完成，无需重复上传！")
+            return
         if folder:
             self.statusBar().showMessage("正在上传处理...")
-            self.upload_thread = UploadThread(folder)
-            self.upload_thread.done.connect(self.on_upload_done)
-            self.upload_thread.start()
 
-    def on_upload_done(self, folder, success, msg):
-        if success:
-            self.processed_dirs.append(folder)
-            self.statusBar().showMessage(msg, 3000)
-        else:
-            self.statusBar().showMessage(f"上传处理失败: {msg}", 5000)
+            # 创建进度监控窗口(如果不存在)
+            if not self.progress_monitor:
+                self.progress_monitor = ProgressMonitor(self)
+
+            # 添加新任务到监控窗口
+            self.progress_monitor.add_task(folder)
+
+            # 创建并启动上传线程
+            thread = UploadThread(folder)
+            self.upload_threads[folder] = thread
+
+            # 连接信号
+            thread.progress_updated.connect(self.update_progress)
+            thread.task_completed.connect(self.on_task_completed)
+
+            thread.start()
+
+    def update_progress(self, folder, progress, status):
+        if self.progress_monitor:
+            self.progress_monitor.update_progress(folder, progress, status)
+
+    def on_task_completed(self, folder, msg):
+        if folder in self.upload_threads:
+            # 从线程列表中移除已完成的线程
+            self.upload_threads[folder].deleteLater()
+            del self.upload_threads[folder]
+
+        # 更新进度窗口
+
+        if self.progress_monitor:
+            self.progress_monitor.complete_task(folder, msg)
+
+        # 添加到已处理目录列表
+        self.processed_dirs.append(folder)
+        self.statusBar().showMessage(f"{folder} 处理完成", 3000)
+
+    # 其他方法保持不变...
+
+    def on_upload_done(self, msg):
+        print(msg)
+        self.processed_dirs.append(self.upload_thread.folder)
+        self.statusBar().showMessage(msg, 3000)
 
     def select_search_dirs(self):
         if not self.processed_dirs:
@@ -448,112 +441,42 @@ class MainWindow(QMainWindow):
 
     def do_search(self):
         text = self.input_text.text().strip()
-        if not text:
-            QMessageBox.warning(self, "提示", "请输入搜索内容！")
+        if not text or not self.selected_search_dirs:
+            QMessageBox.warning(self, "提示", "请输入搜索内容并选择文件夹！")
             return
-            
-        if not self.selected_search_dirs:
-            QMessageBox.warning(self, "提示", "请先选择要搜索的文件夹！")
-            return
+        # 这里添加搜索逻辑
+        # 输出一个包含文件信息的列表
+        print(f"搜索文本: {text}")
+        print(f"搜索路径: {self.selected_search_dirs}")
 
-        self.statusBar().showMessage("正在搜索...")
-        try:
-            # 先通过 FileProcessor 尝试搜索本地文件
-            local_results = self.file_processor.search_files(text, self.selected_search_dirs)
-            
-            # 再通过 API 搜索视频
-            api_results = videoQuery(self.selected_search_dirs, text)
-            
-            # 合并结果
-            all_paths = set(r["path"] for r in local_results) | set(api_results)
-            display_results = []
-            #这里是你要的list返回值
-            for path in all_paths:
-                if os.path.exists(path):
-                    file_stat = os.stat(path)
-                    display_results.append({
-                        "name": os.path.basename(path),
-                        "size": self.format_size(file_stat.st_size),
-                        "mtime": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                        "path": path
-                    })
-
-            self.show_search_results(display_results)
-            
-            # 保存到历史记录
-            if display_results:
-                self.save_to_history(text, [r["path"] for r in display_results[:5]])
-                
-        except Exception as e:
-            self.statusBar().showMessage(f"搜索失败: {str(e)}")
-            QMessageBox.warning(self, "错误", f"搜索失败: {str(e)}")
+        # 模拟搜索结果
+        results = [
+            {"name": "视频1.mp4", "size": "120MB", "mtime": "2024-06-01 20:13", "path": r"C:\Videos\视频1.mp4"},
+            {"name": "视频2.mp4", "size": "150MB", "mtime": "2024-06-01 20:15", "path": r"C:\Videos\视频2.mp4"},
+        ]
+        self.show_search_results(results)
 
     def show_search_results(self, files):
-        """显示搜索结果"""
         self.table_files.setRowCount(len(files))
         self.table_files.files_data = files  # 保存完整数据用于双击打开
-        
+
         for row, file in enumerate(files):
             self.table_files.setItem(row, 0, QTableWidgetItem(file["name"]))
             self.table_files.setItem(row, 1, QTableWidgetItem(file["size"]))
             self.table_files.setItem(row, 2, QTableWidgetItem(file["mtime"]))
-        
-        self.statusBar().showMessage(f"共搜索到 {len(files)} 个文件")
-        
-    def save_to_history(self, search_text, file_paths):
-        """保存搜索历史"""
-        history = {"records": []}
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-            except:
-                pass
-                
-        # 添加新记录
-        new_record = {
-            "text": search_text,
-            "files": file_paths,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        # 确保records字段存在
-        if "records" not in history:
-            history["records"] = []
-            
-        # 添加新记录到开头
-        history["records"].insert(0, new_record)
-        
-        # 只保留最近50条记录
-        history["records"] = history["records"][:50]
-        
-        # 保存历史记录
-        try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"保存历史记录失败: {e}")
 
-    def select_search_dirs(self):
-        if not self.processed_dirs:
-            QMessageBox.warning(self, "提示", "请先上传并处理文件夹！")
-            return
-        dlg = SelectDirDialog(self.processed_dirs, self)
-        if dlg.exec_():
-            self.selected_search_dirs = dlg.get_selected_dirs()
-            print("选择的搜索路径：", self.selected_search_dirs)
+        self.statusBar().showMessage(f"共搜索到 {len(files)} 个文件")
 
     def open_selected_file(self, idx):
         file_info = self.table_files.files_data[idx.row()]
         open_path(file_info["path"])
 
     def choose_settings_folder(self):
-        """在设置页面选择文件夹"""
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if folder:
             self.folder_path_edit.setText(folder)
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"folder": folder}, f, ensure_ascii=False, indent=2)
+                json.dump({"frames_addr": folder}, f, ensure_ascii=False, indent=2)
             self.statusBar().showMessage(f"设置已保存: {folder}", 3000)
 
     def load_history(self):
@@ -568,25 +491,26 @@ class MainWindow(QMainWindow):
                     item.file_paths = record['files']
                     self.history_list.addItem(item)
             except Exception as e:
-                self.statusBar().showMessage(f"保存设置失败: {str(e)}")
-                QMessageBox.warning(self, "错误", f"保存设置失败: {str(e)}")
+                QMessageBox.warning(self, "错误", f"加载历史记录失败: {str(e)}")
 
-# API接口模拟（这里是简化模拟，到时候你替换成api调用）
-def uploadDirectory(directory):
-    """模拟上传目录API"""
-    return {"success": True, "msg": f"目录 {directory} 处理完成"}
+    def open_history_item(self, item):
+        if hasattr(item, 'file_paths') and item.file_paths:
+            open_path(item.file_paths[0])
 
-def videoQuery(directories, query):
-    """模拟视频查询API"""
-    # 这里模拟返回一些测试数据，你到时候换一下在测试
-    return [
-        os.path.join(directories[0], "test1.mp4"),
-        os.path.join(directories[0], "test2.mp4"),
-    ]
+    # -- 界面切换 --
+    def show_main(self):
+        self.stacked_widget.setCurrentWidget(self.main_page)
+        self.statusBar().showMessage("主页")
 
-def scanAndCheckDictory():
-    """模拟目录扫描API"""
-    return True
+    def show_settings(self):
+        self.stacked_widget.setCurrentWidget(self.settings_page)
+        self.statusBar().showMessage("设置")
+
+    def show_history(self):
+        self.stacked_widget.setCurrentWidget(self.history_page)
+        self.load_history()
+        self.statusBar().showMessage("历史记录")
+
 
 class SelectDirDialog(QDialog):
     def __init__(self, dirs, parent=None):
@@ -650,23 +574,10 @@ class SelectDirDialog(QDialog):
             if self.list_widget.item(i).checkState() == Qt.Checked
         ]
 
-if __name__ == "__main__":
-    try:
-        app = QApplication(sys.argv)
-        # 设置应用程序图标
-        if os.path.exists("app/prime_search.png"):
-            app.setWindowIcon(QIcon("app/prime_search.png"))
-            
-        # 创建并显示主窗口
-        window = MainWindow()
-        window.show()
-        
-        # 运行应用程序
-        sys.exit(app.exec_())
-    except Exception as e:
-        print(f"程序启动失败: {str(e)}")
-        # 显示错误对话框
-        if 'app' in locals():
-            QMessageBox.critical(None, "错误", f"程序启动失败: {str(e)}")
-        sys.exit(1)
 
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')  # 使用 Fusion 风格获得更现代的外观
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec_())
