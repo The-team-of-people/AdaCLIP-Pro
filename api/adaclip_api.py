@@ -1,642 +1,583 @@
+import sys
 import os
 import json
-import subprocess
-from pathlib import Path
-import numpy as np
-import torch
-from tqdm import tqdm
-from PIL import Image
-import shutil
+import traceback
 
-from modeling.model import AdaCLIP
-from modeling.clip_model import CLIP
-from configs.config import parser, parse_with_config
-from datasets.dataset import BaseDataset
-from modeling.simple_tokenizer import SimpleTokenizer
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QMainWindow, QPushButton, QLabel, QVBoxLayout,
+    QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
+    QAbstractItemView, QSplitter, QStackedWidget, QCheckBox, QMessageBox, QHeaderView, QStatusBar,
+    QFrame, QDialog, QGroupBox, QGridLayout, QProgressBar
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFont, QPalette, QColor
 
-# ------------- 配置读取 -------------
-def get_frames_root():
-    settings_path = os.path.join(os.path.dirname(__file__), "..", "app", "user_data", "settings.json")
-    settings_path = os.path.abspath(settings_path)
-    with open(settings_path, "r", encoding="utf-8") as f:
-        settings = json.load(f)
-    return settings["frames_addr"]
+# 引入接口
+from api.adaclip_api import (
+    uploadDirectory, videoQuery, scanAndCheckDictory,
+    addVideoToDictory, deleteVideo
+)
 
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))           # 当前文件所在目录【如 api/ 】
-PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))   # 项目根目录
-FRAMES_ROOT = get_frames_root()
-IMG_TMPL = "image_%05d.jpg"
-CKPT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "msrvtt", "trained_model.pth")
-CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "msrvtt-jsfusion.json")
-EMBS_OUTPUT_ROOT = os.path.join(PROJECT_ROOT, "data", "application")
-# -----------------------------------
+BASE_DIR = os.path.dirname(__file__)  # 获取当前脚本所在目录
+SETTINGS_FILE = os.path.join(BASE_DIR, "user_data", "settings.json")  # 相对路径
+HISTORY_FILE = os.path.join(BASE_DIR, "user_data", "history.json")     # 相对路径
 
-def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, frame_size=-1):
+
+def get_style():
+    return """
+    QMainWindow {
+        background-color: #f5f5f5;
+    }
+    QPushButton {
+        background-color: #2196F3;
+        color: white;
+        border: none;
+        padding: 5px 15px;
+        border-radius: 4px;
+        min-height: 25px;
+    }
+    QPushButton:hover {
+        background-color: #1976D2;
+    }
+    QPushButton:pressed {
+        background-color: #0D47A1;
+    }
+    QLineEdit {
+        padding: 5px;
+        border: 1px solid #BBBBBB;
+        border-radius: 4px;
+        background-color: white;
+    }
+    QTableWidget {
+        background-color: white;
+        border: 1px solid #DDDDDD;
+        border-radius: 4px;
+    }
+    QListWidget {
+        background-color: white;
+        border: 1px solid #DDDDDD;
+        border-radius: 4px;
+    }
+    QStatusBar {
+        background-color: #E3F2FD;
+    }
+    QProgressBar {
+        border: 1px solid grey;
+        border-radius: 3px;
+        text-align: center;
+    }
+    QProgressBar::chunk {
+        background-color: #2196F3;
+    }
     """
-    对 video_dir 下所有视频进行切帧，帧存放到 out_dir/每个视频名/ 目录下。
-    """
-    video_dir = Path(video_dir)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    accepted_formats = [".mp4", ".mkv", ".webm", ".avi", ".mov"]
-    videos = [f for f in video_dir.iterdir() if f.suffix.lower() in accepted_formats]
-    for video_path in tqdm(videos, desc=f"Extracting frames from {video_dir.name}"):
-        video_name = video_path.stem
-        dst_directory_path = out_dir / video_name
-        dst_directory_path.mkdir(parents=True, exist_ok=True)
-        # 跳过已存在帧的文件夹
-        if any(dst_directory_path.iterdir()):
-            continue
-        frame_rate_str = f"-r {frame_rate}" if frame_rate > 0 else ""
-        frame_size_str = ""
-        if frame_size > 0:
-            try:
-                import ffmpeg
-                probe = ffmpeg.probe(str(video_path))
-                video_streams = [s for s in probe['streams'] if s['codec_type'] == 'video']
-                if not video_streams:
-                    continue
-                w = int(video_streams[0]['width'])
-                h = int(video_streams[0]['height'])
-            except Exception:
-                w, h = 0, 0
-            if min(w, h) <= frame_size:
-                frame_size_str = ""
-            elif w > h:
-                frame_size_str = f"-vf scale=-1:{frame_size}"
-            else:
-                frame_size_str = f"-vf scale={frame_size}:-1"
-        cmd = f'ffmpeg -nostats -loglevel 0 -i "{video_path}" -q:v 2 {frame_size_str} {frame_rate_str} "{dst_directory_path}/{prefix}"'
-        print(f"[DEBUG] Running ffmpeg: {cmd}")
-        ret = subprocess.call(cmd, shell=True)
-        if ret != 0:
-            print(f"[ERROR] ffmpeg failed for {video_path}, return code: {ret}")
-        subprocess.call(cmd, shell=True)
 
-def save_embeddings_per_video(embs_dir, vids, embs):
-    """
-    将每个视频的embedding单独存为 embs_dir/视频名/embs.npy
-    """
-    for vid, emb in zip(vids, embs):
-        vid_dir = os.path.join(embs_dir, vid)
-        os.makedirs(vid_dir, exist_ok=True)
-        emb_path = os.path.join(vid_dir, "embs.npy")
-        np.save(emb_path, emb)
 
-def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
-                            config_path=CONFIG_PATH, ckpt_path=CKPT_PATH, device_str="cuda",
-                            batch_size=8, save_interval=100, num_workers=8):
-    """
-    读取 frames_dir 下的所有视频帧目录，提取视频特征并保存。每个embedding单独存到 embs_dir/视频名/embs.npy
-    支持CPU和GPU，device_str="cuda"或"cpu"
-    """
-    # 配置加载
-    base_args = parser.parse_args([])
-    base_args.config = config_path
-    cfg = parse_with_config(base_args)
-    cfg.frames_dir = str(frames_dir)
-    cfg.img_tmpl = IMG_TMPL
-    cfg.frame_agg = "mlp"
-    cfg.frame_agg_temp = getattr(cfg, "frame_agg_temp", 1.0)
 
-    # 自动适配CPU/GPU
-    device_str = device_str.lower()
-    use_cuda = torch.cuda.is_available() and device_str.startswith("cuda")
-    device = torch.device("cuda" if use_cuda else "cpu")
-
-    # 视频列表
-    all_vids = sorted([d.name for d in Path(frames_dir).iterdir() if d.is_dir()])
-    processed = set()
-    if os.path.exists(processed_json):
-        processed = set(json.load(open(processed_json)))
-    to_process = [v for v in all_vids if v not in processed]
-    if not to_process:
-        print("Nothing to process.")
-        return
-
-    # 模型加载
-    clip_sd = CLIP.get_config(pretrained_clip_name=cfg.clip_backbone)
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model = AdaCLIP(cfg, clip_sd)
-    sd = ckpt.get("state_dict", ckpt)
-    model.load_state_dict(sd, strict=False)
-    model.to(device)
-    if device.type == "cpu":
-        model.float()
-    model.eval()
-
-    annots_path = os.path.join(PROJECT_ROOT, "annots", "empty.json")
-    preprocess = BaseDataset(cfg, annots_path, is_train=False).clip_preprocess
-    all_pairs = []
-    save_cnt = 0
-    from joblib import Parallel, delayed
-
-    def extract_frames_tensor(frames_dir, vid, num_frm, img_tmpl, preprocess):
-        frame_dir = os.path.join(frames_dir, vid)
-        files = sorted(f for f in os.listdir(frame_dir) if f.endswith(".jpg"))
-        if not files:
-            return None, vid, f"No frames for {vid}"
-        idxs = np.linspace(0, len(files) - 1, num=num_frm, dtype=int)
-        imgs = []
-        for idx in idxs:
-            path = os.path.join(frame_dir, img_tmpl % (idx + 1))
-            if not os.path.exists(path):
-                return None, vid, f"Missing frame {path}"
-            try:
-                img = preprocess(Image.open(path).convert("RGB"))
-            except Exception as e:
-                return None, vid, f"Error loading {path}: {e}"
-            imgs.append(img)
-        return torch.stack(imgs), vid, None
-
-    with torch.no_grad():
-        pbar = tqdm(total=len(to_process), desc="Preprocessing video embeddings")
-        for i in range(0, len(to_process), batch_size):
-            batch = to_process[i:i + batch_size]
-            results = Parallel(n_jobs=num_workers)(
-                delayed(extract_frames_tensor)(
-                    str(frames_dir), vid, cfg.num_frm, IMG_TMPL, preprocess
-                )
-                for vid in batch
-            )
-            vids_batch, frames_batch = [], []
-            for frames, vid, err in results:
-                if frames is None:
-                    tqdm.write(f"[SKIP] {vid}: {err}")
-                else:
-                    vids_batch.append(vid)
-                    frames_batch.append(frames)
-
-            if not frames_batch:
-                pbar.update(len(batch))
-                continue
-
-            batch_tensor = torch.stack(frames_batch).to(device)
-            feats = model.get_visual_output(batch_tensor)
-            feats = model.frame_transformation(feats)
-            logits = model.frame_agg_mlp(feats)
-            weights = torch.softmax(logits / cfg.frame_agg_temp, dim=1)
-            emb_batch = (feats * weights).sum(dim=1)
-            emb_batch = emb_batch.cpu().numpy()
-
-            for vid, emb in zip(vids_batch, emb_batch):
-                all_pairs.append((vid, emb))
-                processed.add(vid)
-                save_cnt += 1
-
-            # 每批保存（为断点/增量友好）
-            if save_cnt >= save_interval:
-                ids, embs = zip(*all_pairs)
-                json.dump(list(ids), open(output_ids, 'w'))
-                save_embeddings_per_video(embs_dir, ids, embs)
-                json.dump(list(processed), open(processed_json, 'w'))
-                save_cnt = 0
-
-            pbar.update(len(batch))
-
-        # 最终保存
-        if all_pairs:
-            ids, embs = zip(*all_pairs)
-            json.dump(list(ids), open(output_ids, 'w'))
-            save_embeddings_per_video(embs_dir, ids, embs)
-            json.dump(list(processed), open(processed_json, 'w'))
-
-        pbar.close()
-    print(f"Finished. Total embeddings saved: {len(all_pairs)} → {embs_dir}/视频名/embs.npy")
-
-def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, device="cuda"):
-    """
-    用户上传一个目录，完成：
-        1. 切帧 (frame/目录名/每个视频名/帧)
-        2. 预处理生成embedding (每个视频一个文件夹)
-    embedding单独存储到 application/目录名/视频名/embs.npy
-    返回：帧目录路径、embedding目录路径、ID路径、处理详情
-    上传成功后将目录绝对路径加入 app/user_data/uploaded_dictory.json
-    任何步骤失败返回 success=False, msg="上传失败：...详细原因"
-    """
-    dictory_addr = os.path.abspath(dictory_addr)
-    dir_name = os.path.basename(dictory_addr.rstrip("/\\"))
-    frame_root = frame_root or FRAMES_ROOT
-    frame_dir = os.path.join(frame_root, dir_name)
-    embs_dir = os.path.join(embs_root, dir_name)
-    os.makedirs(frame_dir, exist_ok=True)
-    os.makedirs(embs_dir, exist_ok=True)
-
-    # 步骤1：切帧
+def open_path(path):
+    """统一的文件/文件夹打开函数"""
     try:
-        extract_frames_for_dir(dictory_addr, frame_dir)
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            QMessageBox.warning(None, "提示", f"路径不存在: {path}")
     except Exception as e:
-        return {
-            "success": False,
-            "msg": f"上传失败：视频切帧出错 - {str(e)}"
-        }
+        QMessageBox.warning(None, "错误", f"打开失败: {str(e)}")
 
-    # 步骤2：特征预处理
-    output_ids = os.path.join(embs_dir, "video_ids.json")
-    processed_json = os.path.join(embs_dir, "processed_videos.json")
-    preprocess_result = preprocess_frames_folder(
-        frame_dir,
-        output_ids,
-        processed_json,
-        embs_dir,
-        device_str=device,
-    )
-    if isinstance(preprocess_result, str) and preprocess_result.startswith("上传失败"):
-        return {
-            "success": False,
-            "msg": preprocess_result
-        }
 
-    # 历史上传目录记录
-    user_data_dir = os.path.join(os.path.dirname(__file__), "..", "app", "user_data")
-    history_path = os.path.join(user_data_dir, "uploaded_dictory.json")
-    os.makedirs(user_data_dir, exist_ok=True)
-    history = []
-    if os.path.exists(history_path):
-        with open(history_path, "r", encoding="utf-8") as f:
-            try:
-                history = json.load(f)
-            except Exception:
-                history = []
-    if dictory_addr not in history:
-        history.append(dictory_addr)
-        with open(history_path, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False, indent=2)
+class UploadThread(QThread):
+    progress_updated = pyqtSignal(str, int, str)  # 文件夹路径, 进度百分比, 状态消息
+    task_completed = pyqtSignal(str, str)  # 文件夹路径, 最终结果
 
-    # 返回 embedding 目录下每个视频的 embs.npy 路径
-    emb_files = {}
-    if os.path.exists(output_ids):
-        with open(output_ids, "r", encoding="utf-8") as f:
-            vids = json.load(f)
-        for vid in vids:
-            emb_path = os.path.join(embs_dir, vid, "embs.npy")
-            emb_files[vid] = emb_path
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
 
-    return {
-        "frame_dir": frame_dir,
-        "embs_dir": embs_dir,
-        "video_ids": output_ids,
-        "processed_json": processed_json,
-        "video_emb_files": emb_files,
-        "success": True,
-        "msg": f"目录 {dictory_addr} 中的视频已经预处理完毕。"
-    }
-def load_per_video_embs(embs_dir):
-    """
-    加载 embs_dir 下所有视频的 embedding。返回 (video_id_list, embs_array, video_path_dict)
-    embs_dir: 形如 data/application/某个上传目录/
-    返回：
-      - video_ids: [str, ...]
-      - embs: [N, D] np.ndarray
-      - video_path_dict: {video_id: 视频绝对路径}
-    """
-    ids_path = os.path.join(embs_dir, "video_ids.json")
-    if not os.path.exists(ids_path):
-        raise FileNotFoundError(f"找不到 video_ids.json: {ids_path}")
-    with open(ids_path, "r", encoding="utf-8") as f:
-        video_ids = json.load(f)
-    embs = []
-    video_path_dict = {}
-    for vid in video_ids:
-        emb_path = os.path.join(embs_dir, vid, "embs.npy")
-        if not os.path.exists(emb_path):
-            raise FileNotFoundError(f"embedding文件不存在: {emb_path}")
-        emb = np.load(emb_path)
-        embs.append(emb)
-        # 真实视频（原文件）路径——假设原始目录保存在 user_data/uploaded_dictory.json
-        # 这里假定视频名和原始视频名一致，否则可传递绝对路径映射
-        # 用帧推断原始目录
-        # 建议：你可以在 embedding 预处理时，把原始绝对路径存到一个 json 里做映射
-        # 这里假定帧目录为 FRAMES_ROOT/目录名/vid，原视频为上传目录/vid + .mp4等
-        # 实际更好做法：上传时存下完整原始视频绝对路径列表到 embs_dir/video_abs_paths.json
-        # 这里用一种通用的推测方式（如需更稳妥请用映射表）
-        video_path_dict[vid] = None  # 这里留空，由外部补全
-    embs = np.stack(embs, axis=0)
-    return video_ids, embs, video_path_dict
-
-def videoQuery(dictory_addrs, message, device="cuda"):
-    """
-    dictory_addrs: 已上传目录（绝对路径组成的list），如 [".../my_videos", ".../sports"]
-    message: 用户输入文本
-    返回：全部视频真实绝对路径合集（按与文本相似度降序排序，list）
-    """
-    # 读取 user_data/uploaded_dictory.json 建立 {上传目录: [原视频绝对路径]} 映射
-    # 若每个上传目录下有 embs_dir/video_abs_paths.json 用它更好
-    user_data_dir = os.path.join(os.path.dirname(__file__), "..", "app", "user_data")
-    history_path = os.path.join(user_data_dir, "uploaded_dictory.json")
-    video_abs_paths_map = {}  # {目录名: {vid: abs_path}}
-    # 建议：上传时顺带存一份 embs_dir/video_abs_paths.json
-    for dir_addr in dictory_addrs:
-        dir_name = os.path.basename(dir_addr.rstrip("/\\"))
-        abs_map_path = os.path.join(EMBS_OUTPUT_ROOT, dir_name, "video_abs_paths.json")
-        if os.path.exists(abs_map_path):
-            with open(abs_map_path, "r", encoding="utf-8") as f:
-                video_abs_paths_map[dir_name] = json.load(f)
-        else:
-            # fallback: 尝试用上传目录下查找
-            video_abs_paths_map[dir_name] = {}
-            for ext in [".mp4", ".mkv", ".webm", ".avi", ".mov"]:
-                for f in os.listdir(dir_addr):
-                    if f.endswith(ext):
-                        name = os.path.splitext(f)[0]
-                        video_abs_paths_map[dir_name][name] = os.path.abspath(os.path.join(dir_addr, f))
-
-    all_video_ids = []
-    all_embs = []
-    all_id_to_path = {}
-
-    for dir_addr in dictory_addrs:
-        dir_name = os.path.basename(dir_addr.rstrip("/\\"))
-        embs_dir = os.path.join(EMBS_OUTPUT_ROOT, dir_name)
-        if not os.path.exists(embs_dir):
-            continue
-        video_ids, embs, _ = load_per_video_embs(embs_dir)
-        all_video_ids.extend([f"{dir_name}:{vid}" for vid in video_ids])
-        all_embs.append(embs)
-        for vid in video_ids:
-            abs_path = video_abs_paths_map.get(dir_name, {}).get(vid, None)
-            if abs_path is not None:
-                all_id_to_path[f"{dir_name}:{vid}"] = abs_path
-            else:
-                # fallback：帧目录/上传目录猜测
-                # 不推荐，仅做兜底
-                guessed_path = None
-                for ext in [".mp4", ".mkv", ".webm", ".avi", ".mov"]:
-                    p = os.path.join(dir_addr, vid + ext)
-                    if os.path.exists(p):
-                        guessed_path = os.path.abspath(p)
-                        break
-                if guessed_path:
-                    all_id_to_path[f"{dir_name}:{vid}"] = guessed_path
-
-    if not all_embs:
-        return []
-    all_embs = np.concatenate(all_embs, axis=0)
-
-    # 2. 文本转embedding
-    base_dir = dictory_addrs[0]
-    config_path = CONFIG_PATH
-    ckpt_path = CKPT_PATH
-    base_args = parser.parse_args([])
-    base_args.config = config_path
-    cfg = parse_with_config(base_args)
-    device_str = device.lower()
-    use_cuda = torch.cuda.is_available() and device_str.startswith("cuda")
-    device_obj = torch.device("cuda" if use_cuda else "cpu")
-    clip_sd = CLIP.get_config(pretrained_clip_name=cfg.clip_backbone)
-    model = AdaCLIP(cfg, clip_sd)
-    ckpt = torch.load(ckpt_path, map_location=device_obj)
-    sd = ckpt.get("state_dict", ckpt)
-    model.load_state_dict(sd, strict=False)
-    model.to(device_obj)
-    if device_obj.type == "cpu":
-        model.float()
-    model.eval()
-    tokenizer = SimpleTokenizer()
-    # 编码文本
-    tokens = tokenizer.encode(message)
-    tokens = tokens[:cfg.max_txt_len]
-    tokens_tensor = torch.zeros((1, cfg.max_txt_len), dtype=torch.int64)
-    tokens_tensor[0, :len(tokens)] = torch.tensor(tokens)
-    tokens_tensor = tokens_tensor.to(device_obj)
-    if tokens_tensor.ndim == 2:
-        tokens_tensor = tokens_tensor.unsqueeze(1)  # [1, 1, max_txt_len]
-    with torch.no_grad():
-        text_feat = model.get_text_output(tokens_tensor)
-        if isinstance(text_feat, tuple):
-            text_feat = text_feat[0]
-        text_feat = text_feat.cpu().numpy().reshape(-1)
-
-    # 3. 检索
-    sims = np.dot(all_embs, text_feat) / (np.linalg.norm(all_embs, axis=1) * np.linalg.norm(text_feat) + 1e-8)
-    idx_sorted = np.argsort(-sims)
-    # 返还全部视频真实绝对路径（按相似度排序）
-    video_addrs = []
-    for idx in idx_sorted:
-        abs_path = all_id_to_path.get(all_video_ids[idx], None)
-        if abs_path is not None:
-            video_addrs.append(abs_path)
-    return video_addrs
-
-def scanAndCheckDictory(dictory_addrs=None):
-    """
-    扫描并检查上传目录列表的状态（预处理文件与视频实际存在性）。
-    - dictory_addrs: 可为None或目录绝对路径列表，如果为None则扫描全部 data/application 下的目录。
-    功能：
-        - 检查每个目录下视频的 video_ids.json、embs.npy、帧目录等是否与实际一致。
-        - 如有视频被删除，则移除对应embedding和帧目录、更新 video_ids.json/processed_videos.json。
-        - 如有新视频加入，则触发帧抽取/embedding生成。
-    返回：
-        - 每个目录的最新视频列表（含已处理与未处理）、状态、错误信息等。
-    """
-    results = {}
-    # 若未指定则扫描全部 application 下的目录
-    root_dir = EMBS_OUTPUT_ROOT
-    if dictory_addrs is None or len(dictory_addrs) == 0:
-        # 默认扫描全部已上传的目录
-        dirs = [os.path.join(root_dir, d) for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))]
-    else:
-        # 用户指定目录
-        dirs = []
-        for d in dictory_addrs:
-            dir_name = os.path.basename(d.rstrip("/\\"))
-            dirs.append(os.path.join(root_dir, dir_name))
-
-    for embs_dir in dirs:
-        dir_name = os.path.basename(embs_dir)
-        result = {
-            "embs_dir": embs_dir,
-            "frame_dir": os.path.join(FRAMES_ROOT, dir_name),
-            "video_ids": [],
-            "removed": [],
-            "added": [],
-            "errors": [],
-            "success": True
-        }
-        # 1. 获取物理帧目录下的视频名
-        frame_dir = result["frame_dir"]
-        if not os.path.exists(frame_dir):
-            result["errors"].append(f"帧目录不存在 {frame_dir}")
-            result["success"] = False
-            results[dir_name] = result
-            continue
-        actual_videos = sorted([d for d in os.listdir(frame_dir) if os.path.isdir(os.path.join(frame_dir, d))])
-
-        # 2. 获取 video_ids.json 中记录
-        ids_path = os.path.join(embs_dir, "video_ids.json")
-        if os.path.exists(ids_path):
-            with open(ids_path, "r", encoding="utf-8") as f:
-                ids_videos = json.load(f)
-        else:
-            ids_videos = []
-        result["video_ids"] = ids_videos
-
-        # 3. 检查已删除/新增
-        removed = [vid for vid in ids_videos if vid not in actual_videos]
-        added = [vid for vid in actual_videos if vid not in ids_videos]
-        result["removed"] = removed
-        result["added"] = added
-
-        # 4. 对于已删除视频，移除embedding、更新json
-        for vid in removed:
-            emb_path = os.path.join(embs_dir, vid, "embs.npy")
-            emb_dir = os.path.dirname(emb_path)
-            if os.path.exists(emb_path):
-                try:
-                    os.remove(emb_path)
-                except Exception as e:
-                    result["errors"].append(f"移除embedding失败 {emb_path}: {e}")
-            if os.path.exists(emb_dir):
-                try:
-                    os.rmdir(emb_dir)
-                except Exception as e:
-                    pass  # 目录可能非空，不强制删除
-        # 更新 video_ids.json
-        new_ids_videos = [vid for vid in ids_videos if vid not in removed]
-        with open(ids_path, "w", encoding="utf-8") as f:
-            json.dump(new_ids_videos, f, ensure_ascii=False, indent=2)
-        # processed_videos.json 也同步更新
-        processed_json = os.path.join(embs_dir, "processed_videos.json")
-        if os.path.exists(processed_json):
-            with open(processed_json, "r", encoding="utf-8") as f:
-                processed = set(json.load(f))
-            processed = [vid for vid in processed if vid not in removed]
-            with open(processed_json, "w", encoding="utf-8") as f:
-                json.dump(list(processed), f, ensure_ascii=False, indent=2)
-
-        # 5. 对于新加视频，自动触发帧抽取和embedding生成
-        if added:
-            added_dirs = [os.path.join(frame_dir, vid) for vid in added]
-            # 这里只处理已切帧的（即帧目录存在且有图片）
-            # 若你希望自动切帧，可加入视频文件扫描和extract_frames_for_dir调用
-            # 自动补embedding
-            preprocess_frames_folder(
-                frame_dir,
-                ids_path,
-                processed_json,
-                embs_dir,
-                device_str="cuda" if torch.cuda.is_available() else "cpu"
-            )
-
-        # 最终刷新一次video_ids
-        if os.path.exists(ids_path):
-            with open(ids_path, "r", encoding="utf-8") as f:
-                result["video_ids"] = json.load(f)
-
-        results[dir_name] = result
-
-    return results
-
-import os
-import shutil
-import json
-from pathlib import Path
-
-# ...其余依赖已在你前面的代码中导入...
-
-def addVideoToDictory(video_addrs, dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, device="cuda"):
-    """
-    将video_addrs中的全部视频（绝对路径）拷贝到dictory_addr（绝对路径）目录下，自动去重（不覆盖同名），
-    并对新增视频做切帧和embedding预处理。返回新增视频名列表和处理结果。
-    """
-    dictory_addr = os.path.abspath(dictory_addr)
-    os.makedirs(dictory_addr, exist_ok=True)
-    added_videos = []
-    skipped_videos = []
-    # 1. 拷贝视频
-    for vpath in video_addrs:
-        vpath = os.path.abspath(vpath)
-        vname = os.path.basename(vpath)
-        dst_path = os.path.join(dictory_addr, vname)
-        if os.path.exists(dst_path):
-            skipped_videos.append(vname)
-            continue  # 不覆盖同名
+    def run(self):
         try:
-            shutil.copy2(vpath, dst_path)
-            added_videos.append(vname)
-        except Exception as e:
-            skipped_videos.append(vname)
-    # 2. 预处理（只处理新增）
-    if added_videos:
-        dir_name = os.path.basename(dictory_addr.rstrip("/\\"))
-        frame_root = frame_root or FRAMES_ROOT
-        frame_dir = os.path.join(frame_root, dir_name)
-        os.makedirs(frame_dir, exist_ok=True)
-        # 只对新加视频切帧
-        extract_frames_for_dir(dictory_addr, frame_dir)
-        # 只对新增帧做embedding（只补充未处理帧）
-        embs_dir = os.path.join(embs_root, dir_name)
-        os.makedirs(embs_dir, exist_ok=True)
-        output_ids = os.path.join(embs_dir, "video_ids.json")
-        processed_json = os.path.join(embs_dir, "processed_videos.json")
-        preprocess_frames_folder(
-            frame_dir,
-            output_ids,
-            processed_json,
-            embs_dir,
-            device_str=device,
-        )
-    return {
-        "added": added_videos,
-        "skipped": skipped_videos,
-        "success": True,
-        "msg": f"新增视频:{added_videos} 已处理；跳过:{skipped_videos}"
-    }
+            # 调用后端上传目录接口
 
-def deleteVideo(video_addrs, frame_root=None, embs_root=EMBS_OUTPUT_ROOT):
-    """
-    删除已上传目录中的视频（绝对路径列表），并清理帧目录和embedding目录下相关预处理文件。
-    """
-    deleted = []
-    not_found = []
-    for vpath in video_addrs:
-        vpath = os.path.abspath(vpath)
-        vname = os.path.basename(vpath)
-        dir_addr = os.path.dirname(vpath)
-        dir_name = os.path.basename(dir_addr.rstrip("/\\"))
-        # 1. 删除原视频文件
-        if os.path.exists(vpath):
+            result = uploadDirectory(self.folder)
+
+            if result.get("success"):
+                self.progress_updated.emit(self.folder, 100, "处理完成")
+                self.task_completed.emit(self.folder, result.get('msg', '处理完成'))
+            else:
+                self.progress_updated.emit(self.folder, 100, f"处理失败: {result.get('msg', '未知错误')}")
+                self.task_completed.emit(self.folder, result)  # 直接传递字典
+
+        except Exception as e:
+            print(f"UploadThread 异常: {type(e).__name__}, 信息: {str(e)}")
+            traceback.print_exc()  # 需要导入 traceback
+            self.progress_updated.emit(self.folder, 100, f"处理异常: {str(e)}")
+            self.task_completed.emit(self.folder, {"success": False, "msg": str(e)})
+
+
+class ProgressMonitor(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("上传进度监控")
+        self.setMinimumWidth(600)
+        self.setStyleSheet(get_style())
+
+        self.layout = QVBoxLayout(self)
+        self.task_widgets = {}  # 存储每个任务的UI组件
+
+        # 添加关闭按钮
+        btn_layout = QHBoxLayout()
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.hide)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_close)
+
+        self.layout.addLayout(btn_layout)
+
+    def add_task(self, folder):
+        # 为每个任务创建一个分组框
+        group_box = QGroupBox(f"处理: {os.path.basename(folder)}")
+        group_box.setStyleSheet("QGroupBox { border: 1px solid #ddd; border-radius: 5px; margin-top: 10px; }")
+
+        task_layout = QGridLayout()
+
+        # 显示文件夹路径
+        path_label = QLabel(f"路径: {folder}")
+        path_label.setWordWrap(True)
+
+        # 进度条
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(0)
+
+        # 状态标签
+        status_label = QLabel("等待中...")
+
+        # 添加到布局
+        task_layout.addWidget(QLabel("状态:"), 0, 0)
+        task_layout.addWidget(status_label, 0, 1)
+        task_layout.addWidget(QLabel("进度:"), 1, 0)
+        task_layout.addWidget(progress_bar, 1, 1)
+        task_layout.addWidget(path_label, 2, 0, 1, 2)
+
+        group_box.setLayout(task_layout)
+        self.layout.insertWidget(self.layout.count() - 1, group_box)  # 插入到关闭按钮之前
+
+        # 保存UI组件引用
+        self.task_widgets[folder] = {
+            "group_box": group_box,
+            "progress_bar": progress_bar,
+            "status_label": status_label
+        }
+
+        self.show()
+
+    def update_progress(self, folder, progress, status):
+        if folder in self.task_widgets:
+            self.task_widgets[folder]["progress_bar"].setValue(progress)
+            self.task_widgets[folder]["status_label"].setText(status)
+
+    def complete_task(self, folder, result):
+        if folder in self.task_widgets:
+            self.task_widgets[folder]["status_label"].setText(f"✓ {result}")
+            self.task_widgets[folder]["progress_bar"].setValue(100)
+            # 设置为绿色完成状态
+            self.task_widgets[folder]["progress_bar"].setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid grey;
+                    border-radius: 3px;
+                    text-align: center;
+                }
+                QProgressBar::chunk {
+                    background-color: #4CAF50;
+                }
+            """)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("文影灵搜")
+        # self.setWindowIcon(QIcon("prime_search.png"))  # 替换为你的PNG路径
+        self.resize(1024, 700)
+        self.selected_search_dirs = []
+        self.processed_dirs = []
+        self.upload_threads = {}  # 存储所有上传线程
+        self.progress_monitor = None  # 进度监控窗口
+
+
+        # 设置全局样式
+        self.setStyleSheet(get_style())
+
+        # 主分割器
+        main_widget = QWidget()
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # 左侧导航栏（15%宽度）
+        self.left_widget = QFrame()
+        self.left_widget.setObjectName("leftPanel")
+        self.left_widget.setStyleSheet("""
+            #leftPanel {
+                background-color: #1E88E5;
+                border-right: 1px solid #1976D2;
+            }
+            QLabel {
+                color: white;
+            }
+            QPushButton {
+                background-color: transparent;
+                color: white;
+                text-align: left;
+                padding: 10px;
+                border: none;
+                border-radius: 0;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+
+        left_layout = QVBoxLayout(self.left_widget)
+        left_layout.setContentsMargins(0, 20, 0, 20)
+        left_layout.setSpacing(10)
+
+        # 应用名称
+        self.app_name = QLabel("文影灵搜")
+        self.app_name.setAlignment(Qt.AlignCenter)
+        self.app_name.setStyleSheet("font-size: 20px; font-weight: bold; padding: 20px;")
+
+        # 导航按钮
+        self.btn_main = QPushButton("主页")
+        self.btn_settings = QPushButton("设置")
+        self.btn_history = QPushButton("历史记录")
+
+        for btn in [self.btn_main, self.btn_settings, self.btn_history]:
+            btn.setFont(QFont("Arial", 10))
+
+        self.btn_main.clicked.connect(self.show_main)
+        self.btn_settings.clicked.connect(self.show_settings)
+        self.btn_history.clicked.connect(self.show_history)
+
+        left_layout.addWidget(self.app_name)
+        left_layout.addWidget(self.btn_main)
+        left_layout.addWidget(self.btn_settings)
+        left_layout.addWidget(self.btn_history)
+        left_layout.addStretch()
+
+        # 右侧内容区
+        self.stacked_widget = QStackedWidget()
+        self.main_page = self.build_main_page()
+        self.settings_page = self.build_settings_page()
+        self.history_page = self.build_history_page()
+
+        self.stacked_widget.addWidget(self.main_page)
+        self.stacked_widget.addWidget(self.settings_page)
+        self.stacked_widget.addWidget(self.history_page)
+
+        main_layout.addWidget(self.left_widget, 15)
+        main_layout.addWidget(self.stacked_widget, 85)
+
+        self.setCentralWidget(main_widget)
+
+        # 状态栏
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("就绪")
+
+    def build_main_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 上传和选择按钮区
+        top_buttons = QHBoxLayout()
+        self.btn_upload = QPushButton("上传")
+        self.btn_select = QPushButton("选择")
+        top_buttons.addWidget(self.btn_upload)
+        top_buttons.addWidget(self.btn_select)
+        top_buttons.addStretch()
+
+        self.btn_upload.clicked.connect(self.upload_folder)
+        self.btn_select.clicked.connect(self.select_search_dirs)
+
+        # 搜索区
+        search_layout = QHBoxLayout()
+        self.input_text = QLineEdit()
+        self.input_text.setPlaceholderText("请输入搜索内容...")
+        self.btn_search = QPushButton("搜索")
+        self.btn_search.clicked.connect(self.do_search)
+
+        search_layout.addWidget(self.input_text)
+        search_layout.addWidget(self.btn_search)
+
+        # 文件展示表格
+        self.table_files = QTableWidget(0, 3)
+        self.table_files.setHorizontalHeaderLabels(["文件名", "大小", "修改时间"])
+        self.table_files.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_files.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_files.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_files.doubleClicked.connect(self.open_selected_file)
+
+        layout.addLayout(top_buttons)
+        layout.addSpacing(10)
+        layout.addLayout(search_layout)
+        layout.addSpacing(10)
+        layout.addWidget(self.table_files)
+
+        widget.setLayout(layout)
+        return widget
+
+    def build_settings_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 返回按钮
+        btn_back = QPushButton("返回主页")
+        btn_back.clicked.connect(self.show_main)
+
+        # 文件夹选择区
+        folder_layout = QHBoxLayout()
+        self.folder_path_edit = QLineEdit()
+        self.folder_path_edit.setPlaceholderText("请选择文件夹路径...")
+        btn_choose = QPushButton("选择文件夹")
+        btn_choose.clicked.connect(self.choose_settings_folder)
+
+        folder_layout.addWidget(self.folder_path_edit)
+        folder_layout.addWidget(btn_choose)
+
+        layout.addWidget(btn_back)
+        layout.addSpacing(20)
+        layout.addLayout(folder_layout)
+        layout.addStretch()
+
+        widget.setLayout(layout)
+        return widget
+
+    def build_history_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 返回按钮
+        btn_back = QPushButton("返回主页")
+        btn_back.clicked.connect(self.show_main)
+
+        # 历史记录列表
+        self.history_list = QListWidget()
+        self.history_list.itemDoubleClicked.connect(self.open_history_item)
+
+        layout.addWidget(btn_back)
+        layout.addSpacing(20)
+        layout.addWidget(self.history_list)
+
+        widget.setLayout(layout)
+        return widget
+
+    # -- 事件处理函数 --
+    def upload_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
+        if folder in self.upload_threads:
+            QMessageBox.warning(self, "提示", "该文件夹正在处理中，请等待完成！")
+            return
+        if folder in self.processed_dirs:
+            QMessageBox.warning(self, "提示", "该文件夹已处理完成，无需重复上传！")
+            return
+        if folder:
+            self.statusBar().showMessage("正在上传处理...")
+
+            # 创建进度监控窗口(如果不存在)
+            if not self.progress_monitor:
+                self.progress_monitor = ProgressMonitor(self)
+
+            # 添加新任务到监控窗口
+            self.progress_monitor.add_task(folder)
+
+            # 创建并启动上传线程
+            thread = UploadThread(folder)
+            self.upload_threads[folder] = thread
+
+            # 连接信号
+            thread.progress_updated.connect(self.update_progress)
+            thread.task_completed.connect(self.on_task_completed)
+
+            thread.start()
+
+    def update_progress(self, folder, progress, status):
+        if self.progress_monitor:
+            self.progress_monitor.update_progress(folder, progress, status)
+
+    def on_task_completed(self, folder, msg):
+        if folder in self.upload_threads:
+            # 从线程列表中移除已完成的线程
+            self.upload_threads[folder].deleteLater()
+            del self.upload_threads[folder]
+
+        # 更新进度窗口
+
+        if self.progress_monitor:
+            self.progress_monitor.complete_task(folder, msg)
+
+        # 添加到已处理目录列表
+        self.processed_dirs.append(folder)
+        self.statusBar().showMessage(f"{folder} 处理完成", 3000)
+
+    # 其他方法保持不变...
+
+    def on_upload_done(self, msg):
+        print(msg)
+        self.processed_dirs.append(self.upload_thread.folder)
+        self.statusBar().showMessage(msg, 3000)
+
+    def select_search_dirs(self):
+        if not self.processed_dirs:
+            QMessageBox.warning(self, "提示", "请先上传并处理文件夹！")
+            return
+        dlg = SelectDirDialog(self.processed_dirs, self)
+        if dlg.exec_():
+            self.selected_search_dirs = dlg.get_selected_dirs()
+            print("选择的搜索路径：", self.selected_search_dirs)
+
+    def do_search(self):
+        text = self.input_text.text().strip()
+        if not text or not self.selected_search_dirs:
+            QMessageBox.warning(self, "提示", "请输入搜索内容并选择文件夹！")
+            return
+        # 这里添加搜索逻辑
+        # 输出一个包含文件信息的列表
+        print(f"搜索文本: {text}")
+        print(f"搜索路径: {self.selected_search_dirs}")
+
+        # 模拟搜索结果
+        results = [
+            {"name": "视频1.mp4", "size": "120MB", "mtime": "2024-06-01 20:13", "path": r"C:\Videos\视频1.mp4"},
+            {"name": "视频2.mp4", "size": "150MB", "mtime": "2024-06-01 20:15", "path": r"C:\Videos\视频2.mp4"},
+        ]
+        self.show_search_results(results)
+
+    def show_search_results(self, files):
+        self.table_files.setRowCount(len(files))
+        self.table_files.files_data = files  # 保存完整数据用于双击打开
+
+        for row, file in enumerate(files):
+            self.table_files.setItem(row, 0, QTableWidgetItem(file["name"]))
+            self.table_files.setItem(row, 1, QTableWidgetItem(file["size"]))
+            self.table_files.setItem(row, 2, QTableWidgetItem(file["mtime"]))
+
+        self.statusBar().showMessage(f"共搜索到 {len(files)} 个文件")
+
+    def open_selected_file(self, idx):
+        file_info = self.table_files.files_data[idx.row()]
+        open_path(file_info["path"])
+
+    def choose_settings_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if folder:
+            self.folder_path_edit.setText(folder)
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"frames_addr": folder}, f, ensure_ascii=False, indent=2)
+            self.statusBar().showMessage(f"设置已保存: {folder}", 3000)
+
+    def load_history(self):
+        self.history_list.clear()
+        if os.path.exists(HISTORY_FILE):
             try:
-                os.remove(vpath)
-                deleted.append(vpath)
-            except Exception:
-                not_found.append(vpath)
-                continue
-        else:
-            not_found.append(vpath)
-            continue
-        # 2. 删除帧目录
-        frame_root_ = frame_root or FRAMES_ROOT
-        frame_dir = os.path.join(frame_root_, dir_name, os.path.splitext(vname)[0])
-        if os.path.exists(frame_dir):
-            shutil.rmtree(frame_dir, ignore_errors=True)
-        # 3. 删除embedding
-        embs_dir = os.path.join(embs_root, dir_name, os.path.splitext(vname)[0])
-        if os.path.exists(embs_dir):
-            shutil.rmtree(embs_dir, ignore_errors=True)
-        # 4. 更新video_ids.json和processed_videos.json
-        embs_dir_root = os.path.join(embs_root, dir_name)
-        ids_path = os.path.join(embs_dir_root, "video_ids.json")
-        processed_json = os.path.join(embs_dir_root, "processed_videos.json")
-        vid_noext = os.path.splitext(vname)[0]
-        # 更新 ids
-        if os.path.exists(ids_path):
-            with open(ids_path, "r", encoding="utf-8") as f:
-                ids = json.load(f)
-            ids = [i for i in ids if i != vid_noext]
-            with open(ids_path, "w", encoding="utf-8") as f:
-                json.dump(ids, f, ensure_ascii=False, indent=2)
-        # 更新 processed
-        if os.path.exists(processed_json):
-            with open(processed_json, "r", encoding="utf-8") as f:
-                processed = json.load(f)
-            processed = [i for i in processed if i != vid_noext]
-            with open(processed_json, "w", encoding="utf-8") as f:
-                json.dump(processed, f, ensure_ascii=False, indent=2)
-    return {
-        "deleted": deleted,
-        "not_found": not_found,
-        "success": True,
-        "msg": f"成功删除:{deleted}；未找到或无法删除:{not_found}"
-    }
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+                for record in history.get("records", []):
+                    txt = f"{record['text']} -> {', '.join(record['files'])}"
+                    item = QListWidgetItem(txt)
+                    item.file_paths = record['files']
+                    self.history_list.addItem(item)
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"加载历史记录失败: {str(e)}")
+
+    def open_history_item(self, item):
+        if hasattr(item, 'file_paths') and item.file_paths:
+            open_path(item.file_paths[0])
+
+    # -- 界面切换 --
+    def show_main(self):
+        self.stacked_widget.setCurrentWidget(self.main_page)
+        self.statusBar().showMessage("主页")
+
+    def show_settings(self):
+        self.stacked_widget.setCurrentWidget(self.settings_page)
+        self.statusBar().showMessage("设置")
+
+    def show_history(self):
+        self.stacked_widget.setCurrentWidget(self.history_page)
+        self.load_history()
+        self.statusBar().showMessage("历史记录")
+
+
+class SelectDirDialog(QDialog):
+    def __init__(self, dirs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择搜索文件夹")
+        self.setMinimumWidth(500)
+        self.setStyleSheet(get_style())
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 文件夹列表
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        for d in dirs:
+            item = QListWidgetItem(d)
+            item.setCheckState(Qt.Unchecked)
+            self.list_widget.addItem(item)
+        self.list_widget.itemDoubleClicked.connect(lambda x: open_path(x.text()))
+
+        # 按钮区
+        btn_layout = QHBoxLayout()
+        self.btn_all = QPushButton("全选")
+        self.btn_none = QPushButton("全不选")
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_ok = QPushButton("确定")
+        self.btn_cancel = QPushButton("取消")
+
+        self.btn_all.clicked.connect(self.select_all)
+        self.btn_none.clicked.connect(self.select_none)
+        self.btn_refresh.clicked.connect(self.refresh_dirs)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        btn_layout.addWidget(self.btn_all)
+        btn_layout.addWidget(self.btn_none)
+        btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_ok)
+        btn_layout.addWidget(self.btn_cancel)
+
+        layout.addWidget(self.list_widget)
+        layout.addLayout(btn_layout)
+
+    def select_all(self):
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setCheckState(Qt.Checked)
+
+    def select_none(self):
+        for i in range(self.list_widget.count()):
+            self.list_widget.item(i).setCheckState(Qt.Unchecked)
+
+    def refresh_dirs(self):
+        print("刷新目录，检查需要重新处理的路径...")
+        QMessageBox.information(self, "刷新", "目录已刷新完成")
+
+    def get_selected_dirs(self):
+        return [
+            self.list_widget.item(i).text()
+            for i in range(self.list_widget.count())
+            if self.list_widget.item(i).checkState() == Qt.Checked
+        ]
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')  # 使用 Fusion 风格获得更现代的外观
+    win = MainWindow()
+    win.show()
+    sys.exit(app.exec_())
