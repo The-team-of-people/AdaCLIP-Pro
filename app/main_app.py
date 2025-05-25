@@ -378,6 +378,12 @@ class MainWindow(QMainWindow):
     # -- 事件处理函数 --
     def upload_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
+        if folder in self.upload_threads:
+            QMessageBox.warning(self, "提示", "该文件夹正在处理中，请等待完成！")
+            return
+        if folder in self.processed_dirs:
+            QMessageBox.warning(self, "提示", "该文件夹已处理完成，无需重复上传！")
+            return
         if folder:
             self.statusBar().showMessage("正在上传处理...")
 
