@@ -1,6 +1,8 @@
 import sys
 import os
 import json
+import traceback
+
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QVBoxLayout,
     QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
@@ -99,12 +101,14 @@ class UploadThread(QThread):
 
             if result.get("success"):
                 self.progress_updated.emit(self.folder, 100, "处理完成")
-                self.task_completed.emit(self.folder, result)
+                self.task_completed.emit(self.folder, result.get('msg', '处理完成'))
             else:
                 self.progress_updated.emit(self.folder, 100, f"处理失败: {result.get('msg', '未知错误')}")
-                self.task_completed.emit(self.folder, {"success": False, "msg": result.get('msg', '未知错误')})
+                self.task_completed.emit(self.folder, result)  # 直接传递字典
 
         except Exception as e:
+            print(f"UploadThread 异常: {type(e).__name__}, 信息: {str(e)}")
+            traceback.print_exc()  # 需要导入 traceback
             self.progress_updated.emit(self.folder, 100, f"处理异常: {str(e)}")
             self.task_completed.emit(self.folder, {"success": False, "msg": str(e)})
 
@@ -398,15 +402,16 @@ class MainWindow(QMainWindow):
         if self.progress_monitor:
             self.progress_monitor.update_progress(folder, progress, status)
 
-    def on_task_completed(self, folder, result):
+    def on_task_completed(self, folder, msg):
         if folder in self.upload_threads:
             # 从线程列表中移除已完成的线程
             self.upload_threads[folder].deleteLater()
             del self.upload_threads[folder]
 
         # 更新进度窗口
+
         if self.progress_monitor:
-            self.progress_monitor.complete_task(folder, result)
+            self.progress_monitor.complete_task(folder, msg)
 
         # 添加到已处理目录列表
         self.processed_dirs.append(folder)
