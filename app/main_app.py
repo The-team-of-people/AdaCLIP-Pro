@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import traceback
+from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QVBoxLayout,
@@ -18,10 +19,9 @@ from api.adaclip_api import (
     addVideoToDictory, deleteVideo
 )
 
-
 BASE_DIR = os.path.dirname(__file__)  # 获取当前脚本所在目录
 SETTINGS_FILE = os.path.join(BASE_DIR, "user_data", "settings.json")  # 相对路径
-HISTORY_FILE = os.path.join(BASE_DIR, "user_data", "history.json")     # 相对路径
+HISTORY_FILE = os.path.join(BASE_DIR, "user_data", "history.json")  # 相对路径
 
 
 def get_style():
@@ -71,7 +71,6 @@ def get_style():
         background-color: #2196F3;
     }
     """
-
 
 
 def open_path(path):
@@ -203,7 +202,6 @@ class MainWindow(QMainWindow):
         self.processed_dirs = []
         self.upload_threads = {}  # 存储所有上传线程
         self.progress_monitor = None  # 进度监控窗口
-
 
         # 设置全局样式
         self.setStyleSheet(get_style())
@@ -444,18 +442,72 @@ class MainWindow(QMainWindow):
         if not text or not self.selected_search_dirs:
             QMessageBox.warning(self, "提示", "请输入搜索内容并选择文件夹！")
             return
-        # 这里添加搜索逻辑
-        # 输出一个包含文件信息的列表
-        print(f"搜索文本: {text}")
-        print(f"搜索路径: {self.selected_search_dirs}")
 
-        # 模拟搜索结果
-        results = [
-            {"name": "视频1.mp4", "size": "120MB", "mtime": "2024-06-01 20:13", "path": r"C:\Videos\视频1.mp4"},
-            {"name": "视频2.mp4", "size": "150MB", "mtime": "2024-06-01 20:15", "path": r"C:\Videos\视频2.mp4"},
-        ]
-        self.show_search_results(results)
+        self.statusBar().showMessage("正在搜索...")
+        try:
+            # 调用API进行视频搜索
+            api_results = videoQuery(self.selected_search_dirs, text)
+            api_results = api_results[:10]
+            print(len(api_results))
+            # 处理搜索结果
+            display_results = []
+            for path in api_results:
+                if os.path.exists(path):
+                    file_stat = os.stat(path)
+                    display_results.append({
+                        "name": os.path.basename(path),
+                        "size": f"{file_stat.st_size / (1024 * 1024):.2f}MB",
+                        "mtime": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                        "path": path
+                    })
 
+            # 显示搜索结果
+            self.show_search_results(display_results)
+
+            # 保存到历史记录
+            if display_results:
+                self.save_to_history(text, [r["path"] for r in display_results[:5]])
+
+            # 更新状态栏
+            self.statusBar().showMessage(f"搜索完成，找到 {len(display_results)} 个结果")
+        except Exception as e:
+            print(f"搜索错误: {str(e)}")
+            self.statusBar().showMessage(f"搜索失败: {str(e)}")
+            QMessageBox.warning(self, "错误", f"搜索失败: {str(e)}")
+
+    def save_to_history(self, search_text, file_paths):
+        """保存搜索历史"""
+        history = {"records": []}
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            except:
+                pass
+
+        # 添加新记录
+        new_record = {
+            "text": search_text,
+            "files": file_paths,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        # 确保records字段存在
+        if "records" not in history:
+            history["records"] = []
+
+        # 添加新记录到开头
+        history["records"].insert(0, new_record)
+
+        # 只保留最近50条记录
+        history["records"] = history["records"][:50]
+
+        # 保存历史记录
+        try:
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存历史记录失败: {e}")
     def show_search_results(self, files):
         self.table_files.setRowCount(len(files))
         self.table_files.files_data = files  # 保存完整数据用于双击打开
@@ -564,8 +616,40 @@ class SelectDirDialog(QDialog):
             self.list_widget.item(i).setCheckState(Qt.Unchecked)
 
     def refresh_dirs(self):
-        print("刷新目录，检查需要重新处理的路径...")
-        QMessageBox.information(self, "刷新", "目录已刷新完成")
+        """刷新目录列表，重新检查处理状态"""
+        try:
+            # 获取当前选中状态
+            current_states = {}
+            for i in range(self.list_widget.count()):
+                item = self.list_widget.item(i)
+                current_states[item.text()] = item.checkState()
+
+            # 检查目录状态
+            result = scanAndCheckDictory()
+            if not result:
+                QMessageBox.warning(self, "错误", "目录扫描失败")
+                return
+
+            # 清空列表
+            self.list_widget.clear()
+
+            # 从 uploaded_directory.json 重新加载目录列表
+            upload_info_file = os.path.join(BASE_DIR, "user_data", "uploaded_directory.json")
+            if os.path.exists(upload_info_file):
+                with open(upload_info_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    # 添加目录到列表，保持原有的选中状态
+                    for dir_path in data.keys():
+                        item = QListWidgetItem(dir_path)
+                        item.setCheckState(current_states.get(dir_path, Qt.Unchecked))
+                        self.list_widget.addItem(item)
+
+            QMessageBox.information(self, "完成", "目录已刷新完成")
+
+        except Exception as e:
+            print(f"刷新目录失败: {str(e)}")
+            traceback.print_exc()
+            QMessageBox.warning(self, "错误", f"刷新目录失败: {str(e)}")
 
     def get_selected_dirs(self):
         return [
