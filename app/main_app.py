@@ -11,8 +11,8 @@ from PyQt5.QtWidgets import (
     QFrame, QDialog, QGroupBox, QGridLayout, QProgressBar
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QPalette, QColor
-
+from PyQt5.QtGui import QFont, QPalette, QColor, QIcon
+from icon_and_font_updates import IconManager
 # 引入接口
 from api.adaclip_api import (
     uploadDirectory, videoQuery, scanAndCheckDictory,
@@ -24,53 +24,189 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "user_data", "settings.json")  # 相对�
 HISTORY_FILE = os.path.join(BASE_DIR, "user_data", "history.json")  # 相对路径
 
 
-def get_style():
+def get_modern_style():
     return """
-    QMainWindow {
-        background-color: #f5f5f5;
+    /* 全局字体设置 */
+    * {
+        font-family: "Microsoft YaHei", "Segoe UI", "Noto Sans CJK SC", sans-serif;
+        font-size: 14px;
     }
+
+    QMainWindow {
+        background-color: #f8f9fa;
+    }
+
+    /* 按钮样式 */
     QPushButton {
-        background-color: #2196F3;
+        background-color: #0d6efd;
         color: white;
         border: none;
-        padding: 5px 15px;
-        border-radius: 4px;
-        min-height: 25px;
+        padding: 10px 24px;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 500;
+        letter-spacing: 0.3px;
     }
+
     QPushButton:hover {
-        background-color: #1976D2;
+        background-color: #0b5ed7;
+        transition: background-color 0.3s;
     }
+
     QPushButton:pressed {
-        background-color: #0D47A1;
+        background-color: #0a58ca;
+        transform: translateY(1px);
     }
+
+    QPushButton:disabled {
+        background-color: #6c757d;
+        opacity: 0.65;
+    }
+
+    /* 输入框样式 */
     QLineEdit {
-        padding: 5px;
-        border: 1px solid #BBBBBB;
-        border-radius: 4px;
+        padding: 10px 14px;
+        border: 2px solid #dee2e6;
+        border-radius: 6px;
         background-color: white;
+        selection-background-color: #0d6efd;
+        selection-color: white;
+        font-size: 14px;
     }
+
+    QLineEdit:focus {
+        border-color: #86b7fe;
+        outline: 0;
+        box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+    }
+
+    /* 表格样式 */
     QTableWidget {
         background-color: white;
-        border: 1px solid #DDDDDD;
-        border-radius: 4px;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        gridline-color: #f1f3f5;
     }
+
+    QTableWidget::item {
+        padding: 10px;
+        border-bottom: 1px solid #f1f3f5;
+        font-size: 14px;
+    }
+
+    QTableWidget::item:selected {
+        background-color: #e7f1ff;
+        color: #000;
+    }
+
+    QHeaderView::section {
+        background-color: #f8f9fa;
+        padding: 12px;
+        border: none;
+        border-bottom: 2px solid #dee2e6;
+        font-weight: bold;
+        color: #495057;
+        font-size: 15px;
+    }
+
+    /* 列表样式 */
     QListWidget {
         background-color: white;
-        border: 1px solid #DDDDDD;
+        border: 1px solid #dee2e6;
+        border-radius: 8px;
+        outline: none;
+    }
+
+    QListWidget::item {
+        padding: 10px 14px;
+        border-bottom: 1px solid #f1f3f5;
+        font-size: 14px;
+    }
+
+    QListWidget::item:selected {
+        background-color: #e7f1ff;
+        color: #000;
+    }
+
+    QListWidget::item:hover {
+        background-color: #f8f9fa;
+    }
+
+    /* 状态栏样式 */
+    QStatusBar {
+        background-color: #f8f9fa;
+        color: #6c757d;
+        border-top: 1px solid #dee2e6;
+        padding: 6px;
+        font-size: 13px;
+    }
+
+    /* 进度条样式 */
+    QProgressBar {
+        border: none;
+        border-radius: 4px;
+        background-color: #e9ecef;
+        text-align: center;
+        color: white;
+        font-size: 12px;
+        font-weight: 500;
+    }
+
+    QProgressBar::chunk {
+        background-color: #0d6efd;
         border-radius: 4px;
     }
-    QStatusBar {
-        background-color: #E3F2FD;
+
+    /* 滚动条样式 */
+    QScrollBar:vertical {
+        border: none;
+        background-color: #f8f9fa;
+        width: 10px;
+        margin: 0px;
     }
-    QProgressBar {
-        border: 1px solid grey;
-        border-radius: 3px;
-        text-align: center;
+
+    QScrollBar::handle:vertical {
+        background-color: #dee2e6;
+        border-radius: 5px;
+        min-height: 30px;
     }
-    QProgressBar::chunk {
-        background-color: #2196F3;
+
+    QScrollBar::handle:vertical:hover {
+        background-color: #adb5bd;
+    }
+
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+        height: 0px;
+    }
+
+    /* 左侧面板样式 */
+    #leftPanel {
+        background-color: #0d6efd;
+        border-right: none;
+    }
+
+    #leftPanel QPushButton {
+        background-color: transparent;
+        color: white;
+        text-align: left;
+        padding: 14px 24px;
+        border-radius: 0;
+        font-size: 15px;
+        font-weight: 500;
+    }
+
+    #leftPanel QPushButton:hover {
+        background-color: rgba(255, 255, 255, 0.1);
+    }
+
+    #leftPanel QLabel {
+        color: white;
+        font-size: 24px;
+        font-weight: bold;
+        padding: 24px;
     }
     """
+
 
 
 def open_path(path):
@@ -117,7 +253,8 @@ class ProgressMonitor(QDialog):
         super().__init__(parent)
         self.setWindowTitle("上传进度监控")
         self.setMinimumWidth(600)
-        self.setStyleSheet(get_style())
+        self.setStyleSheet(get_modern_style())
+        self.setWindowIcon(parent.icon_manager.get_icon())  # 设置对话框图标
 
         self.layout = QVBoxLayout(self)
         self.task_widgets = {}  # 存储每个任务的UI组件
@@ -195,8 +332,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        self.icon_manager = IconManager()
+
         self.setWindowTitle("文影灵搜")
-        # self.setWindowIcon(QIcon("prime_search.png"))  # 替换为你的PNG路径
+        self.setWindowIcon(self.icon_manager.get_icon())
         self.resize(1024, 700)
         self.selected_search_dirs = []
         self.processed_dirs = []
@@ -204,7 +343,7 @@ class MainWindow(QMainWindow):
         self.progress_monitor = None  # 进度监控窗口
 
         # 设置全局样式
-        self.setStyleSheet(get_style())
+        self.setStyleSheet(get_modern_style())
 
         # 主分割器
         main_widget = QWidget()
@@ -351,7 +490,24 @@ class MainWindow(QMainWindow):
         layout.addStretch()
 
         widget.setLayout(layout)
+        self.load_settings_folder()
         return widget
+
+    def load_settings_folder(self):
+        """加载已保存的设置路径"""
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    settings = json.load(f)
+                    frames_addr = settings.get("frames_addr", "")
+                    if frames_addr:
+                        self.folder_path_edit.setText(frames_addr)
+            except Exception as e:
+                print(f"加载设置文件失败: {e}")
+                self.statusBar().showMessage(f"加载设置失败: {str(e)}", 3000)
+        else:
+            # 文件不存在时不做处理，保持占位符显示
+            pass
 
     def build_history_page(self):
         widget = QWidget()
@@ -447,7 +603,11 @@ class MainWindow(QMainWindow):
         try:
             # 调用API进行视频搜索
             api_results = videoQuery(self.selected_search_dirs, text)
-            api_results = api_results[:10]
+            result_count = len(api_results)
+            if result_count > 30:
+                api_results = api_results[:30]
+            else:
+                pass
             print(len(api_results))
             # 处理搜索结果
             display_results = []
@@ -526,10 +686,18 @@ class MainWindow(QMainWindow):
     def choose_settings_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if folder:
+            if not os.path.isdir(folder):
+                QMessageBox.warning(self, "提示", "选择的路径不是有效文件夹")
+                return
+
             self.folder_path_edit.setText(folder)
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"frames_addr": folder}, f, ensure_ascii=False, indent=2)
-            self.statusBar().showMessage(f"设置已保存: {folder}", 3000)
+            try:
+                with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"frames_addr": folder}, f, ensure_ascii=False, indent=2)
+                self.statusBar().showMessage(f"设置已保存: {folder}", 3000)
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"保存设置失败: {str(e)}")
+
 
     def load_history(self):
         self.history_list.clear()
@@ -569,7 +737,8 @@ class SelectDirDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("选择搜索文件夹")
         self.setMinimumWidth(500)
-        self.setStyleSheet(get_style())
+        self.setStyleSheet(get_modern_style())
+        self.setWindowIcon(parent.icon_manager.get_icon())  # 设置对话框图标
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -661,6 +830,18 @@ class SelectDirDialog(QDialog):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+
+    # ---------------------------------------------------------------
+    # 添加这些行来设置默认字体
+    default_font = QFont("Microsoft YaHei")  # 设置默认字体为微软雅黑
+    default_font.setPixelSize(16)  # 设置默认字体大小
+    # -----------------------------------------------------------------
+    # --------------------------------------------------------------
+    # 设置应用程序图标
+    icon_manager = IconManager()
+    app.setWindowIcon(icon_manager.get_icon())
+    # ---------------------------------------------------------------
+
     app.setStyle('Fusion')  # 使用 Fusion 风格获得更现代的外观
     win = MainWindow()
     win.show()
