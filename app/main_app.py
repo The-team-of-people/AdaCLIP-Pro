@@ -222,6 +222,36 @@ def open_path(path):
     except Exception as e:
         QMessageBox.warning(None, "错误", f"打开失败: {str(e)}")
 
+class SearchThread(QThread):
+    search_complete = pyqtSignal(list)  # 发送搜索结果
+    status_update = pyqtSignal(str)     # 发送状态更新
+
+    def __init__(self, search_dirs, search_text):
+        super().__init__()
+        self.search_dirs = search_dirs
+        self.search_text = search_text
+
+    def run(self):
+        try:
+            self.status_update.emit("正在搜索...")
+            # 调用API进行视频搜索
+            api_results = videoQuery(self.search_dirs, self.search_text)
+            self.search_complete.emit(api_results)
+        except Exception as e:
+            self.status_update.emit(f"搜索失败: {str(e)}")
+            self.search_complete.emit([])  # 发送空结果
+
+class SearchingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("搜索中")
+        self.setFixedSize(200, 100)
+        self.setStyleSheet(get_modern_style())
+
+        layout = QVBoxLayout(self)
+        label = QLabel("正在进行搜索，请稍候...")
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label)
 
 class UploadThread(QThread):
     progress_updated = pyqtSignal(str, int, str)  # 文件夹路径, 进度百分比, 状态消息
@@ -354,6 +384,8 @@ class MainWindow(QMainWindow):
         self.processed_dirs = []
         self.upload_threads = {}  # 存储所有上传线程
         self.progress_monitor = None  # 进度监控窗口
+        self.search_thread = None  # 新增：搜索线程
+        self.searching_dialog = None  # 新增：搜索提示弹窗
 
         # 设置全局样式
         self.setStyleSheet(get_modern_style())
@@ -491,7 +523,7 @@ class MainWindow(QMainWindow):
         folder_layout = QHBoxLayout()
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setPlaceholderText("请选择文件夹路径...")
-        btn_choose = QPushButton("选择文件夹")
+        btn_choose = QPushButton("选择帧保存路径")
         btn_choose.clicked.connect(self.choose_settings_folder)
 
         folder_layout.addWidget(self.folder_path_edit)
@@ -615,22 +647,36 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请输入搜索内容并选择文件夹！")
             return
 
+        # 取消之前的搜索线程（如果存在）
+        if self.search_thread and self.search_thread.isRunning():
+            self.search_thread.terminate()
+            self.search_thread.wait()
+
         self.statusBar().showMessage("正在搜索...")
+        self.searching_dialog = SearchingDialog(self)  # 创建搜索提示弹窗
+        self.searching_dialog.show()  # 显示弹窗
+
+        self.search_thread = SearchThread(self.selected_search_dirs, text)
+        self.search_thread.search_complete.connect(self.on_search_complete)
+        self.search_thread.status_update.connect(self.statusBar().showMessage)
+        self.search_thread.finished.connect(self.on_search_finished)  # 新增：连接搜索结束信号
+        self.search_thread.start()
+
+    def on_search_complete(self, api_results):
         try:
-            # 调用API进行视频搜索
-            api_results = videoQuery(self.selected_search_dirs, text)
             result_count = len(api_results)
             if result_count > 30:
-                api_results = api_results[:30]
+                display_results = api_results[:30]
             else:
-                pass
-            print(len(api_results))
+                display_results = api_results
+            print(f"搜索结果数量: {result_count}, 显示数量: {len(display_results)}")
+
             # 处理搜索结果
-            display_results = []
-            for path in api_results:
+            processed_results = []
+            for path in display_results:
                 if os.path.exists(path):
                     file_stat = os.stat(path)
-                    display_results.append({
+                    processed_results.append({
                         "name": os.path.basename(path),
                         "size": f"{file_stat.st_size / (1024 * 1024):.2f}MB",
                         "mtime": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
@@ -638,18 +684,25 @@ class MainWindow(QMainWindow):
                     })
 
             # 显示搜索结果
-            self.show_search_results(display_results)
+            self.show_search_results(processed_results)
 
             # 保存到历史记录
-            if display_results:
-                self.save_to_history(text, [r["path"] for r in display_results[:5]])
+            if processed_results:
+                self.save_to_history(self.input_text.text(), [r["path"] for r in processed_results[:5]])
 
             # 更新状态栏
-            self.statusBar().showMessage(f"搜索完成，找到 {len(display_results)} 个结果")
+            self.statusBar().showMessage(f"搜索完成，找到 {len(processed_results)} 个结果")
         except Exception as e:
-            print(f"搜索错误: {str(e)}")
-            self.statusBar().showMessage(f"搜索失败: {str(e)}")
-            QMessageBox.warning(self, "错误", f"搜索失败: {str(e)}")
+            print(f"处理搜索结果错误: {str(e)}")
+            self.statusBar().showMessage(f"处理结果失败: {str(e)}")
+
+    def on_search_finished(self):
+        if self.searching_dialog:
+            self.searching_dialog.show()  # 确保弹窗显示
+            self.searching_dialog.setWindowTitle("搜索完成")
+            label = self.searching_dialog.findChild(QLabel)
+            if label:
+                label.setText("搜索已完成")
 
     def save_to_history(self, search_text, file_paths):
         """保存搜索历史"""
