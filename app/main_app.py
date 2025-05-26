@@ -207,7 +207,10 @@ def get_modern_style():
     }
     """
 
-
+def normalize(path: str) -> str:
+    # 统一大小写、去掉末尾分隔符、正斜杠
+    p = os.path.normcase(os.path.normpath(path))
+    return p
 
 def open_path(path):
     """统一的文件/文件夹打开函数"""
@@ -229,23 +232,29 @@ class UploadThread(QThread):
         self.folder = folder
 
     def run(self):
-        try:
-            # 调用后端上传目录接口
+        # 启动时主动发送0%进度，让前端进度条立即刷新
+        self.progress_updated.emit(self.folder, 0, "开始处理...")
 
-            result = uploadDirectory(self.folder)
+        def progress_callback(folder, percent, message):
+            # 进度回调由后端调用，线程安全，直接emit
+            self.progress_updated.emit(folder, percent, message)
+
+        try:
+            result = uploadDirectory(self.folder, progress_callback=progress_callback)
 
             if result.get("success"):
+                # 处理结束时发100%
                 self.progress_updated.emit(self.folder, 100, "处理完成")
                 self.task_completed.emit(self.folder, result.get('msg', '处理完成'))
             else:
                 self.progress_updated.emit(self.folder, 100, f"处理失败: {result.get('msg', '未知错误')}")
-                self.task_completed.emit(self.folder, result)  # 直接传递字典
+                self.task_completed.emit(self.folder, result.get('msg', '未知错误'))
 
         except Exception as e:
             print(f"UploadThread 异常: {type(e).__name__}, 信息: {str(e)}")
-            traceback.print_exc()  # 需要导入 traceback
+            traceback.print_exc()
             self.progress_updated.emit(self.folder, 100, f"处理异常: {str(e)}")
-            self.task_completed.emit(self.folder, {"success": False, "msg": str(e)})
+            self.task_completed.emit(self.folder, f"处理异常: {str(e)}")
 
 
 class ProgressMonitor(QDialog):
@@ -307,11 +316,15 @@ class ProgressMonitor(QDialog):
         self.show()
 
     def update_progress(self, folder, progress, status):
+        folder = normalize(folder)
+        print(f"[DEBUG] update_progress 收到: {folder=} {progress=} {status=}")
         if folder in self.task_widgets:
             self.task_widgets[folder]["progress_bar"].setValue(progress)
             self.task_widgets[folder]["status_label"].setText(status)
+            QApplication.processEvents()  # 关键：强制刷新UI
 
     def complete_task(self, folder, result):
+        folder = normalize(folder)
         if folder in self.task_widgets:
             self.task_widgets[folder]["status_label"].setText(f"✓ {result}")
             self.task_widgets[folder]["progress_bar"].setValue(100)
@@ -532,6 +545,7 @@ class MainWindow(QMainWindow):
     # -- 事件处理函数 --
     def upload_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
+        norm = normalize(folder)
         if folder in self.upload_threads:
             QMessageBox.warning(self, "提示", "该文件夹正在处理中，请等待完成！")
             return
@@ -539,6 +553,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "该文件夹已处理完成，无需重复上传！")
             return
         if folder:
+            folder = norm  # 用规范化后的路径
             self.statusBar().showMessage("正在上传处理...")
 
             # 创建进度监控窗口(如果不存在)
@@ -557,6 +572,7 @@ class MainWindow(QMainWindow):
             thread.task_completed.connect(self.on_task_completed)
 
             thread.start()
+
 
     def update_progress(self, folder, progress, status):
         if self.progress_monitor:
