@@ -22,31 +22,37 @@ def get_frames_root():
         settings = json.load(f)
     return settings["frames_addr"]
 
-
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))           # 当前文件所在目录【如 api/ 】
-PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))   # 项目根目录
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, ".."))
 FRAMES_ROOT = get_frames_root()
 IMG_TMPL = "image_%05d.jpg"
 CKPT_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "msrvtt", "trained_model.pth")
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "configs", "msrvtt-jsfusion.json")
 EMBS_OUTPUT_ROOT = os.path.join(PROJECT_ROOT, "data", "application")
-# -----------------------------------
 
-def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, frame_size=-1):
-    """
-    对 video_dir 下所有视频进行切帧，帧存放到 out_dir/每个视频名/ 目录下。
-    """
+def normalize(path: str) -> str:
+    # 统一大小写、去掉末尾分隔符、正斜杠
+    p = os.path.normcase(os.path.normpath(path))
+    return p
+def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, frame_size=-1, progress_callback=None):
     video_dir = Path(video_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     accepted_formats = [".mp4", ".mkv", ".webm", ".avi", ".mov"]
     videos = [f for f in video_dir.iterdir() if f.suffix.lower() in accepted_formats]
-    for video_path in tqdm(videos, desc=f"Extracting frames from {video_dir.name}"):
+    total = len(videos)
+    folder = normalize(str(video_dir))
+    if progress_callback:
+        progress_callback(folder, 0, f"开始切帧，共{total}个视频...")
+
+    for idx, video_path in enumerate(videos):
         video_name = video_path.stem
         dst_directory_path = out_dir / video_name
         dst_directory_path.mkdir(parents=True, exist_ok=True)
-        # 跳过已存在帧的文件夹
         if any(dst_directory_path.iterdir()):
+            if progress_callback:
+                percent = int(((idx + 1) / total) * 50)
+                progress_callback(folder, percent, f"[{idx+1}/{total}] 已存在帧目录: {video_name}，跳过。")
             continue
         frame_rate_str = f"-r {frame_rate}" if frame_rate > 0 else ""
         frame_size_str = ""
@@ -68,16 +74,19 @@ def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, f
             else:
                 frame_size_str = f"-vf scale={frame_size}:-1"
         cmd = f'ffmpeg -nostats -loglevel 0 -i "{video_path}" -q:v 2 {frame_size_str} {frame_rate_str} "{dst_directory_path}/{prefix}"'
-        print(f"[DEBUG] Running ffmpeg: {cmd}")
+        # print(f"[DEBUG] Running ffmpeg: {cmd}")
         ret = subprocess.call(cmd, shell=True)
-        if ret != 0:
-            print(f"[ERROR] ffmpeg failed for {video_path}, return code: {ret}")
-        subprocess.call(cmd, shell=True)
+        # if ret != 0:
+        #     print(f"[ERROR] ffmpeg failed for {video_path}, return code: {ret}")
+        # 每处理一个视频都推送一次进度
+        if progress_callback:
+            percent = int(((idx + 1) / total) * 50)
+            progress_callback(folder, percent, f"[{idx+1}/{total}] 切帧中: {video_name}")
+
+    if progress_callback:
+        progress_callback(folder, 50, f"切帧完成，共{total}个视频。")
 
 def save_embeddings_per_video(embs_dir, vids, embs):
-    """
-    将每个视频的embedding单独存为 embs_dir/视频名/embs.npy
-    """
     for vid, emb in zip(vids, embs):
         vid_dir = os.path.join(embs_dir, vid)
         os.makedirs(vid_dir, exist_ok=True)
@@ -86,12 +95,7 @@ def save_embeddings_per_video(embs_dir, vids, embs):
 
 def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
                             config_path=CONFIG_PATH, ckpt_path=CKPT_PATH, device_str="cuda",
-                            batch_size=8, save_interval=100, num_workers=8):
-    """
-    读取 frames_dir 下的所有视频帧目录，提取视频特征并保存。每个embedding单独存到 embs_dir/视频名/embs.npy
-    支持CPU和GPU，device_str="cuda"或"cpu"
-    """
-    # 配置加载
+                            batch_size=8, save_interval=100, num_workers=8, progress_callback=None):
     base_args = parser.parse_args([])
     base_args.config = config_path
     cfg = parse_with_config(base_args)
@@ -99,23 +103,23 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
     cfg.img_tmpl = IMG_TMPL
     cfg.frame_agg = "mlp"
     cfg.frame_agg_temp = getattr(cfg, "frame_agg_temp", 1.0)
-
-    # 自动适配CPU/GPU
     device_str = device_str.lower()
     use_cuda = torch.cuda.is_available() and device_str.startswith("cuda")
     device = torch.device("cuda" if use_cuda else "cpu")
-
-    # 视频列表
     all_vids = sorted([d.name for d in Path(frames_dir).iterdir() if d.is_dir()])
     processed = set()
     if os.path.exists(processed_json):
         processed = set(json.load(open(processed_json)))
     to_process = [v for v in all_vids if v not in processed]
+    total = len(to_process)
+    frames_dir_norm = normalize(str(frames_dir))
     if not to_process:
-        print("Nothing to process.")
+        if progress_callback:
+            progress_callback(frames_dir_norm, 100, "所有视频已处理，无需重复处理。")
         return
+    if progress_callback:
+        progress_callback(frames_dir_norm, 50, f"开始特征提取，共{total}个视频...")
 
-    # 模型加载
     clip_sd = CLIP.get_config(pretrained_clip_name=cfg.clip_backbone)
     ckpt = torch.load(ckpt_path, map_location=device)
     model = AdaCLIP(cfg, clip_sd)
@@ -125,7 +129,6 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
     if device.type == "cpu":
         model.float()
     model.eval()
-
     annots_path = os.path.join(PROJECT_ROOT, "annots", "empty.json")
     preprocess = BaseDataset(cfg, annots_path, is_train=False).clip_preprocess
     all_pairs = []
@@ -151,8 +154,8 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
         return torch.stack(imgs), vid, None
 
     with torch.no_grad():
-        pbar = tqdm(total=len(to_process), desc="Preprocessing video embeddings")
-        for i in range(0, len(to_process), batch_size):
+        processed_count = 0
+        for i in range(0, total, batch_size):
             batch = to_process[i:i + batch_size]
             results = Parallel(n_jobs=num_workers)(
                 delayed(extract_frames_tensor)(
@@ -163,29 +166,34 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
             vids_batch, frames_batch = [], []
             for frames, vid, err in results:
                 if frames is None:
-                    tqdm.write(f"[SKIP] {vid}: {err}")
+                    # 跳过无帧的视频，但也算进进度
+                    processed_count += 1
+                    if progress_callback:
+                        percent = 50 + int((processed_count / total) * 50)
+                        progress_callback(frames_dir_norm, percent, f"[{processed_count}/{total}] 特征提取中（无帧跳过: {vid}）")
                 else:
                     vids_batch.append(vid)
                     frames_batch.append(frames)
 
-            if not frames_batch:
-                pbar.update(len(batch))
-                continue
+            # 处理本批中实际有帧的视频
+            if frames_batch:
+                batch_tensor = torch.stack(frames_batch).to(device)
+                feats = model.get_visual_output(batch_tensor)
+                feats = model.frame_transformation(feats)
+                logits = model.frame_agg_mlp(feats)
+                weights = torch.softmax(logits / cfg.frame_agg_temp, dim=1)
+                emb_batch = (feats * weights).sum(dim=1)
+                emb_batch = emb_batch.cpu().numpy()
 
-            batch_tensor = torch.stack(frames_batch).to(device)
-            feats = model.get_visual_output(batch_tensor)
-            feats = model.frame_transformation(feats)
-            logits = model.frame_agg_mlp(feats)
-            weights = torch.softmax(logits / cfg.frame_agg_temp, dim=1)
-            emb_batch = (feats * weights).sum(dim=1)
-            emb_batch = emb_batch.cpu().numpy()
+                for idx_in_batch, (vid, emb) in enumerate(zip(vids_batch, emb_batch)):
+                    all_pairs.append((vid, emb))
+                    processed.add(vid)
+                    save_cnt += 1
+                    processed_count += 1
+                    if progress_callback:
+                        percent = 50 + int((processed_count / total) * 50)
+                        progress_callback(frames_dir_norm, percent, f"[{processed_count}/{total}] 特征提取中: {vid}")
 
-            for vid, emb in zip(vids_batch, emb_batch):
-                all_pairs.append((vid, emb))
-                processed.add(vid)
-                save_cnt += 1
-
-            # 每批保存（为断点/增量友好）
             if save_cnt >= save_interval:
                 ids, embs = zip(*all_pairs)
                 json.dump(list(ids), open(output_ids, 'w'))
@@ -193,28 +201,14 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
                 json.dump(list(processed), open(processed_json, 'w'))
                 save_cnt = 0
 
-            pbar.update(len(batch))
-
-        # 最终保存
         if all_pairs:
             ids, embs = zip(*all_pairs)
             json.dump(list(ids), open(output_ids, 'w'))
             save_embeddings_per_video(embs_dir, ids, embs)
             json.dump(list(processed), open(processed_json, 'w'))
-
-        pbar.close()
-    print(f"Finished. Total embeddings saved: {len(all_pairs)} → {embs_dir}/视频名/embs.npy")
-
-def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, device="cuda"):
-    """
-    用户上传一个目录，完成：
-        1. 切帧 (frame/目录名/每个视频名/帧)
-        2. 预处理生成embedding (每个视频一个文件夹)
-    embedding单独存储到 application/目录名/视频名/embs.npy
-    返回：帧目录路径、embedding目录路径、ID路径、处理详情
-    上传成功后将目录绝对路径加入 app/user_data/uploaded_dictory.json
-    任何步骤失败返回 success=False, msg="上传失败：...详细原因"
-    """
+    if progress_callback:
+        progress_callback(frames_dir_norm, 100, f"特征提取完成，共{len(all_pairs)}个视频。")
+def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, device="cuda", progress_callback=None):
     dictory_addr = os.path.abspath(dictory_addr)
     dir_name = os.path.basename(dictory_addr.rstrip("/\\"))
     frame_root = frame_root or FRAMES_ROOT
@@ -223,32 +217,32 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
     os.makedirs(frame_dir, exist_ok=True)
     os.makedirs(embs_dir, exist_ok=True)
 
-    # 步骤1：切帧
-    try:
-        extract_frames_for_dir(dictory_addr, frame_dir)
-    except Exception as e:
-        return {
-            "success": False,
-            "msg": f"上传失败：视频切帧出错 - {str(e)}"
-        }
+    if progress_callback:
+        progress_callback(dictory_addr, 0, "上传初始化...")
 
-    # 步骤2：特征预处理
+    try:
+        extract_frames_for_dir(dictory_addr, frame_dir, progress_callback=progress_callback)
+    except Exception as e:
+        if progress_callback:
+            progress_callback(dictory_addr, 100, f"上传失败：视频切帧出错 - {str(e)}")
+        return {"success": False, "msg": f"上传失败：视频切帧出错 - {str(e)}"}
+
     output_ids = os.path.join(embs_dir, "video_ids.json")
     processed_json = os.path.join(embs_dir, "processed_videos.json")
-    preprocess_result = preprocess_frames_folder(
-        frame_dir,
-        output_ids,
-        processed_json,
-        embs_dir,
-        device_str=device,
-    )
-    if isinstance(preprocess_result, str) and preprocess_result.startswith("上传失败"):
-        return {
-            "success": False,
-            "msg": preprocess_result
-        }
+    try:
+        preprocess_result = preprocess_frames_folder(
+            frame_dir,
+            output_ids,
+            processed_json,
+            embs_dir,
+            device_str=device,
+            progress_callback=progress_callback,
+        )
+    except Exception as e:
+        if progress_callback:
+            progress_callback(dictory_addr, 100, f"上传失败：特征提取出错 - {str(e)}")
+        return {"success": False, "msg": f"上传失败：特征提取出错 - {str(e)}"}
 
-    # 历史上传目录记录
     user_data_dir = os.path.join(os.path.dirname(__file__), "..", "app", "user_data")
     history_path = os.path.join(user_data_dir, "uploaded_dictory.json")
     os.makedirs(user_data_dir, exist_ok=True)
@@ -264,7 +258,6 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
 
-    # 返回 embedding 目录下每个视频的 embs.npy 路径
     emb_files = {}
     if os.path.exists(output_ids):
         with open(output_ids, "r", encoding="utf-8") as f:
@@ -272,6 +265,9 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
         for vid in vids:
             emb_path = os.path.join(embs_dir, vid, "embs.npy")
             emb_files[vid] = emb_path
+
+    if progress_callback:
+        progress_callback(dictory_addr, 100, f"目录 {dictory_addr} 中的视频已全部处理完毕。")
 
     return {
         "frame_dir": frame_dir,
