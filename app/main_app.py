@@ -1085,7 +1085,23 @@ class MainWindow(QMainWindow):
 
     def display_search_results(self, results):
         self.searching_dialog.close()
-        self.all_results = results
+        processed_results = []
+        # 兼容两种情况：一是已经是dict（有name等字段），一是字符串路径
+        for r in results:
+            if isinstance(r, dict) and "name" in r and "size" in r and "modified" in r:
+                processed_results.append(r)
+            elif isinstance(r, str) and os.path.exists(r):
+                file_stat = os.stat(r)
+                processed_results.append({
+                    "name": os.path.basename(r),
+                    "size": f"{file_stat.st_size / (1024 * 1024):.2f}MB",
+                    "modified": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "path": r
+                })
+        if not processed_results:
+            QMessageBox.warning(self, "提示", "搜索结果为空或格式错误")
+            return
+        self.all_results = processed_results
         self.current_page = 1
         self.total_pages = (len(self.all_results) + self.page_size - 1) // self.page_size
         self.update_pagination()
