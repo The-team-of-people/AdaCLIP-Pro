@@ -8,11 +8,13 @@ from PyQt5.QtWidgets import (
     QApplication, QWidget, QMainWindow, QPushButton, QLabel, QVBoxLayout,
     QHBoxLayout, QLineEdit, QFileDialog, QListWidget, QListWidgetItem, QTableWidget, QTableWidgetItem,
     QAbstractItemView, QSplitter, QStackedWidget, QCheckBox, QMessageBox, QHeaderView, QStatusBar,
-    QFrame, QDialog, QGroupBox, QGridLayout, QProgressBar
+    QFrame, QDialog, QGroupBox, QGridLayout, QProgressBar, QToolButton, QAction, QMenu
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QPalette, QColor, QIcon
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QPropertyAnimation, QEasingCurve, QTimer, QPoint
+from PyQt5.QtGui import QFont, QPalette, QColor, QIcon, QPixmap, QCursor
 from icon_and_font_updates import IconManager
+# 引入新样式表
+from resources.stylesheet import get_modern_style, get_nav_button_style
 # 引入接口
 from api.adaclip_api import (
     uploadDirectory, videoQuery, scanAndCheckDictory,
@@ -379,15 +381,19 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("文影灵搜")
         self.setWindowIcon(self.icon_manager.get_icon())
-        self.resize(1024, 700)
+        self.resize(1200, 800)  # 适当增大默认窗口尺寸
         self.selected_search_dirs = []
         self.processed_dirs = []
         self.upload_threads = {}  # 存储所有上传线程
         self.progress_monitor = None  # 进度监控窗口
-        self.search_thread = None  # 新增：搜索线程
-        self.searching_dialog = None  # 新增：搜索提示弹窗
+        self.search_thread = None  # 搜索线程
+        self.searching_dialog = None  # 搜索提示弹窗
+
+        # 确保图标存在
+        self._ensure_icons_exist()
 
         # 设置全局样式
+        from resources.stylesheet import get_modern_style
         self.setStyleSheet(get_modern_style())
 
         # 主分割器
@@ -396,56 +402,78 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 左侧导航栏（15%宽度）
+        # 左侧导航栏
         self.left_widget = QFrame()
         self.left_widget.setObjectName("leftPanel")
-        self.left_widget.setStyleSheet("""
-            #leftPanel {
-                background-color: #1E88E5;
-                border-right: 1px solid #1976D2;
-            }
-            QLabel {
-                color: white;
-            }
-            QPushButton {
-                background-color: transparent;
-                color: white;
-                text-align: left;
-                padding: 10px;
-                border: none;
-                border-radius: 0;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-        """)
 
         left_layout = QVBoxLayout(self.left_widget)
         left_layout.setContentsMargins(0, 20, 0, 20)
-        left_layout.setSpacing(10)
+        left_layout.setSpacing(15)
 
-        # 应用名称
+        # 应用名称和logo
+        logo_layout = QHBoxLayout()
+        app_icon = QLabel()
+        app_icon.setPixmap(self.icon_manager.get_icon().pixmap(32, 32))
+        app_icon.setAlignment(Qt.AlignCenter)
+        app_icon.setStyleSheet("background-color: transparent;")
+
         self.app_name = QLabel("文影灵搜")
         self.app_name.setAlignment(Qt.AlignCenter)
-        self.app_name.setStyleSheet("font-size: 20px; font-weight: bold; padding: 20px;")
+        self.app_name.setStyleSheet("font-size: 22px; font-weight: bold; padding: 10px; background-color: transparent;")
+
+        logo_layout.addStretch(1)
+        logo_layout.addWidget(app_icon)
+        logo_layout.addWidget(self.app_name)
+        logo_layout.addStretch(1)
+
+        # 导航分隔线
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("background-color: rgba(255, 255, 255, 0.2); margin: 5px 15px;")
 
         # 导航按钮
-        self.btn_main = QPushButton("主页")
-        self.btn_settings = QPushButton("设置")
-        self.btn_history = QPushButton("历史记录")
+        nav_layout = QVBoxLayout()
+        self.btn_main = QPushButton("  主页")
+        self.btn_main.setCheckable(True)
+        self.btn_main.setChecked(True)
+        self.btn_main.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "home.png")))
+        self.btn_main.setIconSize(QSize(20, 20))
+
+        self.btn_settings = QPushButton("  设置")
+        self.btn_settings.setCheckable(True)
+        self.btn_settings.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "settings.png")))
+        self.btn_settings.setIconSize(QSize(20, 20))
+
+        self.btn_history = QPushButton("  历史记录")
+        self.btn_history.setCheckable(True)
+        self.btn_history.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "history.png")))
+        self.btn_history.setIconSize(QSize(20, 20))
 
         for btn in [self.btn_main, self.btn_settings, self.btn_history]:
-            btn.setFont(QFont("Arial", 10))
+            btn.setStyleSheet(get_nav_button_style())
+            btn.setMinimumHeight(50)
 
         self.btn_main.clicked.connect(self.show_main)
         self.btn_settings.clicked.connect(self.show_settings)
         self.btn_history.clicked.connect(self.show_history)
 
-        left_layout.addWidget(self.app_name)
-        left_layout.addWidget(self.btn_main)
-        left_layout.addWidget(self.btn_settings)
-        left_layout.addWidget(self.btn_history)
+        nav_layout.addWidget(self.btn_main)
+        nav_layout.addWidget(self.btn_settings)
+        nav_layout.addWidget(self.btn_history)
+        nav_layout.setSpacing(8)
+        nav_layout.addStretch()
+
+        left_layout.addLayout(logo_layout)
+        left_layout.addWidget(separator)
+        left_layout.addLayout(nav_layout)
         left_layout.addStretch()
+
+        # 版本信息
+        version_label = QLabel("V 1.0.0")
+        version_label.setAlignment(Qt.AlignCenter)
+        version_label.setStyleSheet("color: rgba(255,255,255,0.4); font-size: 12px;")
+        left_layout.addWidget(version_label)
 
         # 右侧内容区
         self.stacked_widget = QStackedWidget()
@@ -457,86 +485,405 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(self.settings_page)
         self.stacked_widget.addWidget(self.history_page)
 
-        main_layout.addWidget(self.left_widget, 15)
-        main_layout.addWidget(self.stacked_widget, 85)
+        main_layout.addWidget(self.left_widget, 1)
+        main_layout.addWidget(self.stacked_widget, 5)
 
         self.setCentralWidget(main_widget)
 
         # 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪")
+        self.status_bar.showMessage("欢迎使用文影灵搜")
+
+    def _ensure_icons_exist(self):
+        """确保必要的图标文件存在"""
+        icons_dir = os.path.join(BASE_DIR, "resources", "icons")
+        os.makedirs(icons_dir, exist_ok=True)
+
+        # 创建基本图标 - 如果不存在的话
+        icons = {
+            "home.png": "#0d6efd",
+            "settings.png": "#0d6efd",
+            "history.png": "#0d6efd",
+            "search.png": "#0d6efd",
+            "upload.png": "#198754",
+            "select.png": "#0d6efd",
+            "folder.png": "#6c757d",
+            "delete.png": "#dc3545",
+            "next.png": "#0d6efd",
+            "prev.png": "#0d6efd"
+        }
+
+        # 检查图标是否存在，不存在则跳过(避免重复创建和依赖PIL)
+        for icon_name in icons:
+            icon_path = os.path.join(icons_dir, icon_name)
+            if not os.path.exists(icon_path):
+                print(f"警告: 缺少图标文件 {icon_name}，请确保resources/icons目录中包含所需的图标文件。")
 
     def build_main_page(self):
         widget = QWidget()
-        layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(30, 30, 30, 30)
+        main_layout.setSpacing(20)
 
-        # 上传和选择按钮区
-        top_buttons = QHBoxLayout()
-        self.btn_upload = QPushButton("上传")
-        self.btn_select = QPushButton("选择")
-        top_buttons.addWidget(self.btn_upload)
-        top_buttons.addWidget(self.btn_select)
-        top_buttons.addStretch()
+        # 顶部标题区域
+        title_label = QLabel("视频内容搜索")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #212529; margin-bottom: 10px;")
+
+        # 创建搜索卡片
+        search_card = QWidget()
+        search_card.setObjectName("searchCard")
+        search_card.setStyleSheet("""
+            #searchCard {
+                background-color: white;
+                border-radius: 10px;
+                border: 1px solid #dee2e6;
+            }
+        """)
+
+        search_layout = QVBoxLayout(search_card)
+        search_layout.setContentsMargins(25, 25, 25, 25)
+
+        # 上传和选择按钮区域
+        action_layout = QHBoxLayout()
+
+        # 使用带有图标的按钮
+        self.btn_upload = QPushButton(" 上传文件夹")
+        self.btn_upload.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "upload.png")))
+        self.btn_upload.setIconSize(QSize(18, 18))
+        self.btn_upload.setStyleSheet("background-color: #198754;")  # 绿色按钮
+        self.btn_upload.setMinimumHeight(40)
+
+        self.btn_select = QPushButton(" 选择搜索范围")
+        self.btn_select.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "select.png")))
+        self.btn_select.setIconSize(QSize(18, 18))
+        self.btn_select.setMinimumHeight(40)
+
+        action_layout.addWidget(self.btn_upload)
+        action_layout.addWidget(self.btn_select)
+        action_layout.addStretch()
 
         self.btn_upload.clicked.connect(self.upload_folder)
         self.btn_select.clicked.connect(self.select_search_dirs)
 
-        # 搜索区
-        search_layout = QHBoxLayout()
+        # 创建搜索输入区域
+        search_frame = QFrame()
+        search_frame.setStyleSheet("""
+            QFrame {
+                border: 2px solid #dee2e6;
+                border-radius: 24px;
+                background-color: #f8f9fa;
+                padding: 5px;
+                margin-top: 15px;
+            }
+        """)
+
+        search_input_layout = QHBoxLayout(search_frame)
+        search_input_layout.setContentsMargins(15, 5, 5, 5)
+        search_input_layout.setSpacing(10)
+
+        # 搜索图标
+        search_icon = QLabel()
+        search_pixmap = QPixmap(os.path.join(BASE_DIR, "resources", "icons", "search.png"))
+        search_icon.setPixmap(search_pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        # 搜索输入框
         self.input_text = QLineEdit()
-        self.input_text.setPlaceholderText("请输入搜索内容...")
+        self.input_text.setPlaceholderText("输入内容进行视频搜索...")
+        self.input_text.setStyleSheet("""
+            QLineEdit {
+                border: none;
+                background-color: transparent;
+                font-size: 16px;
+                padding: 8px;
+            }
+        """)
+        self.input_text.setMinimumHeight(40)
+
+        # 搜索按钮
         self.btn_search = QPushButton("搜索")
+        self.btn_search.setStyleSheet("""
+            QPushButton {
+                background-color: #0d6efd;
+                border-radius: 20px;
+                padding: 10px 25px;
+                font-weight: bold;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #0b5ed7;
+            }
+        """)
+        self.btn_search.setMinimumHeight(40)
         self.btn_search.clicked.connect(self.do_search)
 
-        search_layout.addWidget(self.input_text)
-        search_layout.addWidget(self.btn_search)
+        # 把组件添加到搜索栏布局
+        search_input_layout.addWidget(search_icon)
+        search_input_layout.addWidget(self.input_text, 1)
+        search_input_layout.addWidget(self.btn_search)
 
-        # 文件展示表格
-        self.table_files = QTableWidget(0, 3)
-        self.table_files.setHorizontalHeaderLabels(["文件名", "大小", "修改时间"])
+        # 把所有组件添加到搜索卡片
+        search_layout.addLayout(action_layout)
+        search_layout.addWidget(search_frame)
+
+        # 添加搜索卡片到主布局
+        main_layout.addWidget(title_label)
+        main_layout.addWidget(search_card)
+
+        # 结果区域标题
+        results_label = QLabel("搜索结果")
+        results_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #495057; margin-top: 10px;")
+
+        # 文件展示表格 - 美化表格样式
+        self.table_files = QTableWidget(0, 4)  # 增加为4列，添加序号列
+        self.table_files.setHorizontalHeaderLabels(["序号", "文件名", "大小", "修改时间"])
         self.table_files.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_files.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table_files.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_files.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)  # 仅文件名列自动伸缩
+        self.table_files.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 序号列自适应内容宽度
+        self.table_files.setStyleSheet("""
+            QTableWidget {
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                padding: 5px;
+                background-color: white;
+                gridline-color: #f1f3f5;
+            }
+            QHeaderView::section {
+                background-color: #f8f9fa;
+                padding: 15px 10px;
+                border: none;
+                border-bottom: 2px solid #dee2e6;
+                font-weight: bold;
+                color: #495057;
+            }
+            QTableWidget::item {
+                padding: 12px 6px;
+                border-bottom: 1px solid #f1f3f5;
+            }
+            QTableWidget::item:selected {
+                background-color: #e7f1ff;
+                color: #000;
+            }
+        """)
         self.table_files.doubleClicked.connect(self.open_selected_file)
+        self.table_files.setAlternatingRowColors(True)  # 交替行颜色
 
-        layout.addLayout(top_buttons)
-        layout.addSpacing(10)
-        layout.addLayout(search_layout)
-        layout.addSpacing(10)
-        layout.addWidget(self.table_files)
+        # 分页控制区
+        pagination_layout = QHBoxLayout()
+        pagination_layout.setContentsMargins(0, 10, 0, 0)
 
-        widget.setLayout(layout)
+        self.page_info_label = QLabel("第 0/0 页，共 0 条记录")
+
+        self.btn_prev_page = QPushButton("上一页")
+        self.btn_prev_page.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "prev.png")))
+        self.btn_prev_page.setIconSize(QSize(16, 16))
+        self.btn_prev_page.clicked.connect(self.prev_page)
+        self.btn_prev_page.setEnabled(False)
+
+        self.btn_next_page = QPushButton("下一页")
+        self.btn_next_page.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "next.png")))
+        self.btn_next_page.setIconSize(QSize(16, 16))
+        self.btn_next_page.clicked.connect(self.next_page)
+        self.btn_next_page.setEnabled(False)
+
+        pagination_layout.addWidget(self.page_info_label)
+        pagination_layout.addStretch()
+        pagination_layout.addWidget(self.btn_prev_page)
+        pagination_layout.addWidget(self.btn_next_page)
+
+        # 添加结果标题、表格和分页控制到主布局
+        main_layout.addWidget(results_label)
+        main_layout.addWidget(self.table_files, 1)  # 表格可伸缩
+        main_layout.addLayout(pagination_layout)
+
+        # 分页相关变量
+        self.page_size = 10  # 每页显示10条记录
+        self.current_page = 1
+        self.total_pages = 1
+        self.all_results = []  # 存储所有搜索结果
+
+        widget.setLayout(main_layout)
         return widget
 
     def build_settings_page(self):
         widget = QWidget()
         layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
 
-        # 返回按钮
-        btn_back = QPushButton("返回主页")
-        btn_back.clicked.connect(self.show_main)
+        # 顶部标题区域
+        title_label = QLabel("应用设置")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #212529; margin-bottom: 10px;")
 
-        # 文件夹选择区
+        # 创建设置卡片
+        settings_card = QWidget()
+        settings_card.setObjectName("settingsCard")
+        settings_card.setStyleSheet("""
+            #settingsCard {
+                background-color: white;
+                border-radius: 10px;
+                border: 1px solid #dee2e6;
+            }
+        """)
+
+        settings_layout = QVBoxLayout(settings_card)
+        settings_layout.setContentsMargins(25, 25, 25, 25)
+        settings_layout.setSpacing(20)
+
+        # 帧保存路径设置区
+        path_group = QGroupBox("视频帧保存路径")
+        path_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                margin-top: 15px;
+                padding-top: 15px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top center;
+                padding: 0 10px;
+                color: #495057;
+                font-size: 16px;
+            }
+        """)
+
+        path_layout = QVBoxLayout(path_group)
+        path_layout.setContentsMargins(15, 20, 15, 15)
+        path_layout.setSpacing(15)
+
+        # 帧保存路径说明
+        path_desc = QLabel("设置视频帧图像的默认保存路径，用于存储视频处理过程中生成的帧图像文件。")
+        path_desc.setWordWrap(True)
+        path_desc.setStyleSheet("color: #6c757d; font-size: 14px;")
+
+        # 帧路径选择区
         folder_layout = QHBoxLayout()
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setPlaceholderText("请选择文件夹路径...")
-        btn_choose = QPushButton("选择帧保存路径")
+        self.folder_path_edit.setStyleSheet("""
+            QLineEdit {
+                border: 2px solid #dee2e6;
+                border-radius: 6px;
+                padding: 10px;
+                background-color: #f8f9fa;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border-color: #86b7fe;
+            }
+        """)
+        self.folder_path_edit.setMinimumHeight(40)
+
+        btn_choose = QPushButton("选择路径")
+        btn_choose.setIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "folder.png")))
+        btn_choose.setIconSize(QSize(16, 16))
+        btn_choose.setMinimumHeight(40)
         btn_choose.clicked.connect(self.choose_settings_folder)
 
-        folder_layout.addWidget(self.folder_path_edit)
-        folder_layout.addWidget(btn_choose)
+        folder_layout.addWidget(self.folder_path_edit, 3)
+        folder_layout.addWidget(btn_choose, 1)
 
-        layout.addWidget(btn_back)
-        layout.addSpacing(20)
-        layout.addLayout(folder_layout)
-        layout.addStretch()
+        path_layout.addWidget(path_desc)
+        path_layout.addLayout(folder_layout)
+
+        # 其他设置项 (示例)
+        app_settings = QGroupBox("应用设置")
+        app_settings.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                margin-top: 15px;
+                padding-top: 15px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top center;
+                padding: 0 10px;
+                color: #495057;
+                font-size: 16px;
+            }
+        """)
+
+        app_layout = QVBoxLayout(app_settings)
+        app_layout.setContentsMargins(15, 20, 15, 15)
+
+        # 添加一些示例设置选项
+        auto_start = QCheckBox("启动时自动加载上次搜索")
+        auto_start.setStyleSheet("font-size: 14px;")
+
+        save_history = QCheckBox("保存搜索历史记录")
+        save_history.setChecked(True)
+        save_history.setStyleSheet("font-size: 14px;")
+
+        app_layout.addWidget(auto_start)
+        app_layout.addWidget(save_history)
+        app_layout.addStretch()
+
+        # 添加所有设置组到设置卡片
+        settings_layout.addWidget(path_group)
+        settings_layout.addWidget(app_settings)
+        settings_layout.addStretch()
+
+        # 底部按钮区
+        btn_layout = QHBoxLayout()
+        btn_save = QPushButton("保存设置")
+        btn_save.setStyleSheet("background-color: #198754;")  # 绿色按钮
+        btn_save.setMinimumHeight(40)
+        btn_save.setMinimumWidth(120)
+        btn_save.clicked.connect(self.save_settings)
+
+        btn_back = QPushButton("返回主页")
+        btn_back.setMinimumHeight(40)
+        btn_back.setMinimumWidth(120)
+        btn_back.clicked.connect(self.show_main)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_back)
+
+        # 添加到主布局
+        layout.addWidget(title_label)
+        layout.addWidget(settings_card, 1)
+        layout.addLayout(btn_layout)
 
         widget.setLayout(layout)
+        # 加载保存的设置
         self.load_settings_folder()
         return widget
+
+    def save_settings(self):
+        """保存所有设置"""
+        try:
+            folder_path = self.folder_path_edit.text().strip()
+            if folder_path and not os.path.isdir(folder_path):
+                QMessageBox.warning(self, "提示", "设置的路径不是有效文件夹")
+                return
+
+            settings = {}
+            if os.path.exists(SETTINGS_FILE):
+                try:
+                    with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                        settings = json.load(f)
+                except:
+                    settings = {}
+
+            # 更新设置
+            settings["frames_addr"] = folder_path
+
+            # 保存设置
+            os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+
+            QMessageBox.information(self, "成功", "设置已成功保存")
+            self.statusBar().showMessage("设置已保存", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"保存设置失败: {str(e)}")
+            print(f"保存设置失败: {e}")
 
     def load_settings_folder(self):
         """加载已保存的设置路径"""
@@ -549,369 +896,238 @@ class MainWindow(QMainWindow):
                         self.folder_path_edit.setText(frames_addr)
             except Exception as e:
                 print(f"加载设置文件失败: {e}")
-                self.statusBar().showMessage(f"加载设置失败: {str(e)}", 3000)
-        else:
-            # 文件不存在时不做处理，保持占位符显示
-            pass
 
     def build_history_page(self):
         widget = QWidget()
         layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
 
-        # 返回按钮
-        btn_back = QPushButton("返回主页")
-        btn_back.clicked.connect(self.show_main)
+        # 顶部标题区域
+        title_label = QLabel("历史记录")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #212529; margin-bottom: 10px;")
+
+        # 搜索栏
+        search_layout = QHBoxLayout()
+        search_frame = QFrame()
+        search_frame.setStyleSheet("""
+            QFrame {
+                border: 2px solid #dee2e6;
+                border-radius: 6px;
+                background-color: #f8f9fa;
+                padding: 2px;
+            }
+        """)
+
+        search_input_layout = QHBoxLayout(search_frame)
+        search_input_layout.setContentsMargins(10, 2, 10, 2)
+        search_input_layout.setSpacing(5)  # 减小间距
+
+        # 搜索图标
+        search_icon = QLabel()
+        search_pixmap = QPixmap(os.path.join(BASE_DIR, "resources", "icons", "search.png"))
+        search_icon.setPixmap(search_pixmap.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        search_icon.setFixedWidth(20)  # 固定宽度，防止空白
+
+        # 搜索输入框
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("搜索历史记录...")
+        self.history_search.setStyleSheet("""
+            QLineEdit {
+                border: none;
+                background-color: transparent;
+                font-size: 14px;
+                padding: 5px;
+            }
+        """)
+        self.history_search.textChanged.connect(self.filter_history)
+
+        search_input_layout.addWidget(search_icon)
+        search_input_layout.addWidget(self.history_search)
+
+        search_layout.addWidget(search_frame)
 
         # 历史记录列表
         self.history_list = QListWidget()
+        self.history_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                padding: 5px;
+                background-color: white;
+            }
+            QListWidget::item {
+                padding: 10px 14px;
+                border-bottom: 1px solid #f1f3f5;
+                font-size: 14px;
+            }
+            QListWidget::item:selected {
+                background-color: #e7f1ff;
+                color: #000;
+            }
+        """)
         self.history_list.itemDoubleClicked.connect(self.open_history_item)
 
-        layout.addWidget(btn_back)
-        layout.addSpacing(20)
+        layout.addWidget(title_label)
+        layout.addLayout(search_layout)
         layout.addWidget(self.history_list)
 
         widget.setLayout(layout)
+        self.load_history()
         return widget
 
-    # -- 事件处理函数 --
-    def upload_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择要上传的文件夹")
-        norm = normalize(folder)
-        if folder in self.upload_threads:
-            QMessageBox.warning(self, "提示", "该文件夹正在处理中，请等待完成！")
-            return
-        if folder in self.processed_dirs:
-            QMessageBox.warning(self, "提示", "该文件夹已处理完成，无需重复上传！")
-            return
+    def load_history(self):
+        """加载历史记录"""
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+                    for item in history:
+                        list_item = QListWidgetItem(item)
+                        self.history_list.addItem(list_item)
+            except Exception as e:
+                print(f"加载历史记录失败: {e}")
+
+    def filter_history(self, text):
+        """过滤历史记录"""
+        for i in range(self.history_list.count()):
+            item = self.history_list.item(i)
+            item.setHidden(text.lower() not in item.text().lower())
+
+    def open_history_item(self, item):
+        """打开历史记录项"""
+        QMessageBox.information(self, "历史记录", f"你双击了: {item.text()}")
+
+    def show_main(self):
+        self.stacked_widget.setCurrentWidget(self.main_page)
+        self.btn_main.setChecked(True)
+        self.btn_settings.setChecked(False)
+        self.btn_history.setChecked(False)
+
+    def show_settings(self):
+        self.stacked_widget.setCurrentWidget(self.settings_page)
+        self.btn_main.setChecked(False)
+        self.btn_settings.setChecked(True)
+        self.btn_history.setChecked(False)
+
+    def show_history(self):
+        self.stacked_widget.setCurrentWidget(self.history_page)
+        self.btn_main.setChecked(False)
+        self.btn_settings.setChecked(False)
+        self.btn_history.setChecked(True)
+
+    def choose_settings_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if folder:
-            folder = norm  # 用规范化后的路径
-            self.statusBar().showMessage("正在上传处理...")
+            self.folder_path_edit.setText(folder)
 
-            # 创建进度监控窗口(如果不存在)
-            if not self.progress_monitor:
-                self.progress_monitor = ProgressMonitor(self)
+    def upload_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if folder:
+            self.processed_dirs.append(folder)
+            self.start_upload_task(folder)
 
-            # 添加新任务到监控窗口
-            self.progress_monitor.add_task(folder)
+    def select_search_dirs(self):
+        folders = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if folders:
+            self.selected_search_dirs.append(folders)
+            QMessageBox.information(self, "选择成功", f"已选择文件夹: {folders}")
 
-            # 创建并启动上传线程
-            thread = UploadThread(folder)
-            self.upload_threads[folder] = thread
+    def start_upload_task(self, folder):
+        if folder in self.upload_threads:
+            QMessageBox.warning(self, "提示", "该文件夹正在处理，请勿重复添加")
+            return
 
-            # 连接信号
-            thread.progress_updated.connect(self.update_progress)
-            thread.task_completed.connect(self.on_task_completed)
+        # 创建上传线程
+        upload_thread = UploadThread(folder)
+        upload_thread.progress_updated.connect(self.update_progress)
+        upload_thread.task_completed.connect(self.complete_task)
+        self.upload_threads[folder] = upload_thread
 
-            thread.start()
+        # 创建进度监控窗口
+        if not self.progress_monitor:
+            self.progress_monitor = ProgressMonitor(self)
 
+        self.progress_monitor.add_task(folder)
+        upload_thread.start()
 
     def update_progress(self, folder, progress, status):
         if self.progress_monitor:
             self.progress_monitor.update_progress(folder, progress, status)
 
-    def on_task_completed(self, folder, msg):
-        if folder in self.upload_threads:
-            # 从线程列表中移除已完成的线程
-            self.upload_threads[folder].deleteLater()
-            del self.upload_threads[folder]
-
-        # 更新进度窗口
-
+    def complete_task(self, folder, result):
         if self.progress_monitor:
-            self.progress_monitor.complete_task(folder, msg)
-
-        # 添加到已处理目录列表
-        self.processed_dirs.append(folder)
-        self.statusBar().showMessage(f"{folder} 处理完成", 3000)
-
-    # 其他方法保持不变...
-
-    def on_upload_done(self, msg):
-        print(msg)
-        self.processed_dirs.append(self.upload_thread.folder)
-        self.statusBar().showMessage(msg, 3000)
-
-    def select_search_dirs(self):
-        if not self.processed_dirs:
-            QMessageBox.warning(self, "提示", "请先上传并处理文件夹！")
-            return
-        dlg = SelectDirDialog(self.processed_dirs, self)
-        if dlg.exec_():
-            self.selected_search_dirs = dlg.get_selected_dirs()
-            print("选择的搜索路径：", self.selected_search_dirs)
+            self.progress_monitor.complete_task(folder, result)
 
     def do_search(self):
-        text = self.input_text.text().strip()
-        if not text or not self.selected_search_dirs:
-            QMessageBox.warning(self, "提示", "请输入搜索内容并选择文件夹！")
+        search_text = self.input_text.text().strip()
+        if not search_text:
+            QMessageBox.warning(self, "提示", "请输入搜索内容")
             return
 
-        # 取消之前的搜索线程（如果存在）
-        if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.terminate()
-            self.search_thread.wait()
+        if not self.selected_search_dirs:
+            QMessageBox.warning(self, "提示", "请选择搜索范围")
+            return
 
-        self.statusBar().showMessage("正在搜索...")
-        self.searching_dialog = SearchingDialog(self)  # 创建搜索提示弹窗
-        self.searching_dialog.show()  # 显示弹窗
+        # 创建搜索线程
+        self.search_thread = SearchThread(self.selected_search_dirs, search_text)
+        self.search_thread.search_complete.connect(self.display_search_results)
+        self.search_thread.status_update.connect(self.update_status)
 
-        self.search_thread = SearchThread(self.selected_search_dirs, text)
-        self.search_thread.search_complete.connect(self.on_search_complete)
-        self.search_thread.status_update.connect(self.statusBar().showMessage)
-        self.search_thread.finished.connect(self.on_search_finished)  # 新增：连接搜索结束信号
+        # 显示搜索提示弹窗
+        self.searching_dialog = SearchingDialog(self)
+        self.searching_dialog.show()
+
         self.search_thread.start()
 
-    def on_search_complete(self, api_results):
-        try:
-            result_count = len(api_results)
-            if result_count > 30:
-                display_results = api_results[:30]
-            else:
-                display_results = api_results
-            print(f"搜索结果数量: {result_count}, 显示数量: {len(display_results)}")
+    def display_search_results(self, results):
+        self.searching_dialog.close()
+        self.all_results = results
+        self.current_page = 1
+        self.total_pages = (len(self.all_results) + self.page_size - 1) // self.page_size
+        self.update_pagination()
 
-            # 处理搜索结果
-            processed_results = []
-            for path in display_results:
-                if os.path.exists(path):
-                    file_stat = os.stat(path)
-                    processed_results.append({
-                        "name": os.path.basename(path),
-                        "size": f"{file_stat.st_size / (1024 * 1024):.2f}MB",
-                        "mtime": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                        "path": path
-                    })
+    def update_pagination(self):
+        self.table_files.setRowCount(0)
+        start_index = (self.current_page - 1) * self.page_size
+        end_index = min(start_index + self.page_size, len(self.all_results))
 
-            # 显示搜索结果
-            self.show_search_results(processed_results)
+        for i in range(start_index, end_index):
+            result = self.all_results[i]
+            row_position = self.table_files.rowCount()
+            self.table_files.insertRow(row_position)
+            self.table_files.setItem(row_position, 0, QTableWidgetItem(str(i + 1)))
+            self.table_files.setItem(row_position, 1, QTableWidgetItem(result["name"]))
+            self.table_files.setItem(row_position, 2, QTableWidgetItem(result["size"]))
+            self.table_files.setItem(row_position, 3, QTableWidgetItem(result["modified"]))
 
-            # 保存到历史记录
-            if processed_results:
-                self.save_to_history(self.input_text.text(), [r["path"] for r in processed_results[:5]])
+        self.page_info_label.setText(f"第 {self.current_page}/{self.total_pages} 页，共 {len(self.all_results)} 条记录")
+        self.btn_prev_page.setEnabled(self.current_page > 1)
+        self.btn_next_page.setEnabled(self.current_page < self.total_pages)
 
-            # 更新状态栏
-            self.statusBar().showMessage(f"搜索完成，找到 {len(processed_results)} 个结果")
-        except Exception as e:
-            print(f"处理搜索结果错误: {str(e)}")
-            self.statusBar().showMessage(f"处理结果失败: {str(e)}")
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.update_pagination()
 
-    def on_search_finished(self):
-        if self.searching_dialog:
-            self.searching_dialog.show()  # 确保弹窗显示
-            self.searching_dialog.setWindowTitle("搜索完成")
-            label = self.searching_dialog.findChild(QLabel)
-            if label:
-                label.setText("搜索已完成")
+    def next_page(self):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+            self.update_pagination()
 
-    def save_to_history(self, search_text, file_paths):
-        """保存搜索历史"""
-        history = {"records": []}
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-            except:
-                pass
+    def update_status(self, status):
+        self.status_bar.showMessage(status)
 
-        # 添加新记录
-        new_record = {
-            "text": search_text,
-            "files": file_paths,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-        # 确保records字段存在
-        if "records" not in history:
-            history["records"] = []
-
-        # 添加新记录到开头
-        history["records"].insert(0, new_record)
-
-        # 只保留最近50条记录
-        history["records"] = history["records"][:50]
-
-        # 保存历史记录
-        try:
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"保存历史记录失败: {e}")
-    def show_search_results(self, files):
-        self.table_files.setRowCount(len(files))
-        self.table_files.files_data = files  # 保存完整数据用于双击打开
-
-        for row, file in enumerate(files):
-            self.table_files.setItem(row, 0, QTableWidgetItem(file["name"]))
-            self.table_files.setItem(row, 1, QTableWidgetItem(file["size"]))
-            self.table_files.setItem(row, 2, QTableWidgetItem(file["mtime"]))
-
-        self.statusBar().showMessage(f"共搜索到 {len(files)} 个文件")
-
-    def open_selected_file(self, idx):
-        file_info = self.table_files.files_data[idx.row()]
-        open_path(file_info["path"])
-
-    def choose_settings_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
-        if folder:
-            if not os.path.isdir(folder):
-                QMessageBox.warning(self, "提示", "选择的路径不是有效文件夹")
-                return
-
-            self.folder_path_edit.setText(folder)
-            try:
-                with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                    json.dump({"frames_addr": folder}, f, ensure_ascii=False, indent=2)
-                self.statusBar().showMessage(f"设置已保存: {folder}", 3000)
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"保存设置失败: {str(e)}")
-
-
-    def load_history(self):
-        self.history_list.clear()
-        if os.path.exists(HISTORY_FILE):
-            try:
-                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-                for record in history.get("records", []):
-                    txt = f"{record['text']} -> {', '.join(record['files'])}"
-                    item = QListWidgetItem(txt)
-                    item.file_paths = record['files']
-                    self.history_list.addItem(item)
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"加载历史记录失败: {str(e)}")
-
-    def open_history_item(self, item):
-        if hasattr(item, 'file_paths') and item.file_paths:
-            open_path(item.file_paths[0])
-
-    # -- 界面切换 --
-    def show_main(self):
-        self.stacked_widget.setCurrentWidget(self.main_page)
-        self.statusBar().showMessage("主页")
-
-    def show_settings(self):
-        self.stacked_widget.setCurrentWidget(self.settings_page)
-        self.statusBar().showMessage("设置")
-
-    def show_history(self):
-        self.stacked_widget.setCurrentWidget(self.history_page)
-        self.load_history()
-        self.statusBar().showMessage("历史记录")
-
-
-class SelectDirDialog(QDialog):
-    def __init__(self, dirs, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("选择搜索文件夹")
-        self.setMinimumWidth(500)
-        self.setStyleSheet(get_modern_style())
-        self.setWindowIcon(parent.icon_manager.get_icon())  # 设置对话框图标
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        # 文件夹列表
-        self.list_widget = QListWidget()
-        self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        for d in dirs:
-            item = QListWidgetItem(d)
-            item.setCheckState(Qt.Unchecked)
-            self.list_widget.addItem(item)
-        self.list_widget.itemDoubleClicked.connect(lambda x: open_path(x.text()))
-
-        # 按钮区
-        btn_layout = QHBoxLayout()
-        self.btn_all = QPushButton("全选")
-        self.btn_none = QPushButton("全不选")
-        self.btn_refresh = QPushButton("刷新")
-        self.btn_ok = QPushButton("确定")
-        self.btn_cancel = QPushButton("取消")
-
-        self.btn_all.clicked.connect(self.select_all)
-        self.btn_none.clicked.connect(self.select_none)
-        self.btn_refresh.clicked.connect(self.refresh_dirs)
-        self.btn_ok.clicked.connect(self.accept)
-        self.btn_cancel.clicked.connect(self.reject)
-
-        btn_layout.addWidget(self.btn_all)
-        btn_layout.addWidget(self.btn_none)
-        btn_layout.addWidget(self.btn_refresh)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_ok)
-        btn_layout.addWidget(self.btn_cancel)
-
-        layout.addWidget(self.list_widget)
-        layout.addLayout(btn_layout)
-
-    def select_all(self):
-        for i in range(self.list_widget.count()):
-            self.list_widget.item(i).setCheckState(Qt.Checked)
-
-    def select_none(self):
-        for i in range(self.list_widget.count()):
-            self.list_widget.item(i).setCheckState(Qt.Unchecked)
-
-    def refresh_dirs(self):
-        """刷新目录列表，重新检查处理状态"""
-        try:
-            # 获取当前选中状态
-            current_states = {}
-            for i in range(self.list_widget.count()):
-                item = self.list_widget.item(i)
-                current_states[item.text()] = item.checkState()
-
-            # 检查目录状态
-            result = scanAndCheckDictory()
-            if not result:
-                QMessageBox.warning(self, "错误", "目录扫描失败")
-                return
-
-            # 清空列表
-            self.list_widget.clear()
-
-            # 从 uploaded_directory.json 重新加载目录列表
-            upload_info_file = os.path.join(BASE_DIR, "user_data", "uploaded_directory.json")
-            if os.path.exists(upload_info_file):
-                with open(upload_info_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # 添加目录到列表，保持原有的选中状态
-                    for dir_path in data.keys():
-                        item = QListWidgetItem(dir_path)
-                        item.setCheckState(current_states.get(dir_path, Qt.Unchecked))
-                        self.list_widget.addItem(item)
-
-            QMessageBox.information(self, "完成", "目录已刷新完成")
-
-        except Exception as e:
-            print(f"刷新目录失败: {str(e)}")
-            traceback.print_exc()
-            QMessageBox.warning(self, "错误", f"刷新目录失败: {str(e)}")
-
-    def get_selected_dirs(self):
-        return [
-            self.list_widget.item(i).text()
-            for i in range(self.list_widget.count())
-            if self.list_widget.item(i).checkState() == Qt.Checked
-        ]
+    def open_selected_file(self):
+        selected_row = self.table_files.currentRow()
+        if selected_row >= 0:
+            file_name = self.table_files.item(selected_row, 1).text()
+            file_path = os.path.join(self.selected_search_dirs[0], file_name)
+            open_path(file_path)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-
-    # ---------------------------------------------------------------
-    # 添加这些行来设置默认字体
-    default_font = QFont("Microsoft YaHei")  # 设置默认字体为微软雅黑
-    default_font.setPixelSize(16)  # 设置默认字体大小
-    # -----------------------------------------------------------------
-    # --------------------------------------------------------------
-    # 设置应用程序图标
-    icon_manager = IconManager()
-    app.setWindowIcon(icon_manager.get_icon())
-    # ---------------------------------------------------------------
-
-    app.setStyle('Fusion')  # 使用 Fusion 风格获得更现代的外观
-    win = MainWindow()
-    win.show()
+    window = MainWindow()
+    window.show()
     sys.exit(app.exec_())
