@@ -34,55 +34,75 @@ def normalize(path: str) -> str:
     # 统一大小写、去掉末尾分隔符、正斜杠
     p = os.path.normcase(os.path.normpath(path))
     return p
-def extract_frames_for_dir(video_dir, out_dir, prefix=IMG_TMPL, frame_rate=-1, frame_size=-1, progress_callback=None):
+def extract_frames_for_dir(video_dir, out_dir,
+                           prefix=IMG_TMPL,
+                           frame_rate=-1,
+                           frame_size=-1,
+                           progress_callback=None,
+                           origin_folder=None):
+    """
+    切帧阶段占前 50% 进度，每处理完一个视频就回调一次。
+    已存在帧目录时跳过，但仍会回调进度。
+    """
     video_dir = Path(video_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 支持的视频格式
     accepted_formats = [".mp4", ".mkv", ".webm", ".avi", ".mov"]
     videos = [f for f in video_dir.iterdir() if f.suffix.lower() in accepted_formats]
     total = len(videos)
     folder = normalize(str(video_dir))
+
+    # 0% 初始回调
     if progress_callback:
         progress_callback(folder, 0, f"开始切帧，共{total}个视频...")
 
-    for idx, video_path in enumerate(videos):
+    for idx, video_path in enumerate(videos, start=1):
         video_name = video_path.stem
-        dst_directory_path = out_dir / video_name
-        dst_directory_path.mkdir(parents=True, exist_ok=True)
-        if any(dst_directory_path.iterdir()):
+        dst = out_dir / video_name
+        dst.mkdir(parents=True, exist_ok=True)
+
+        # 如果已存在帧目录，则跳过并回调
+        if any(dst.iterdir()):
             if progress_callback:
-                percent = int(((idx + 1) / total) * 50)
-                progress_callback(folder, percent, f"[{idx+1}/{total}] 已存在帧目录: {video_name}，跳过。")
+                pct = int(idx / total * 50)
+                progress_callback(folder, pct,
+                                  f"[{idx}/{total}] 已存在帧目录，跳过：{video_name}")
             continue
+
+        # 构建 ffmpeg 参数
         frame_rate_str = f"-r {frame_rate}" if frame_rate > 0 else ""
         frame_size_str = ""
         if frame_size > 0:
             try:
                 import ffmpeg
                 probe = ffmpeg.probe(str(video_path))
-                video_streams = [s for s in probe['streams'] if s['codec_type'] == 'video']
-                if not video_streams:
-                    continue
-                w = int(video_streams[0]['width'])
-                h = int(video_streams[0]['height'])
+                vstream = next(s for s in probe["streams"] if s["codec_type"] == "video")
+                w, h = int(vstream["width"]), int(vstream["height"])
+                if min(w, h) > frame_size:
+                    if w > h:
+                        frame_size_str = f"-vf scale=-1:{frame_size}"
+                    else:
+                        frame_size_str = f"-vf scale={frame_size}:-1"
             except Exception:
-                w, h = 0, 0
-            if min(w, h) <= frame_size:
-                frame_size_str = ""
-            elif w > h:
-                frame_size_str = f"-vf scale=-1:{frame_size}"
-            else:
-                frame_size_str = f"-vf scale={frame_size}:-1"
-        cmd = f'ffmpeg -nostats -loglevel 0 -i "{video_path}" -q:v 2 {frame_size_str} {frame_rate_str} "{dst_directory_path}/{prefix}"'
-        # print(f"[DEBUG] Running ffmpeg: {cmd}")
-        ret = subprocess.call(cmd, shell=True)
-        # if ret != 0:
-        #     print(f"[ERROR] ffmpeg failed for {video_path}, return code: {ret}")
-        # 每处理一个视频都推送一次进度
-        if progress_callback:
-            percent = int(((idx + 1) / total) * 50)
-            progress_callback(folder, percent, f"[{idx+1}/{total}] 切帧中: {video_name}")
+                pass
 
+        # 执行切帧
+        cmd = (
+            f'ffmpeg -nostats -loglevel 0 -i "{video_path}" -q:v 2 '
+            f'{frame_size_str} {frame_rate_str} '
+            f'"{dst}/{prefix}"'
+        )
+        subprocess.call(cmd, shell=True)
+
+        # 每个视频后立即回调进度
+        if progress_callback:
+            pct = int(idx / total * 50)
+            progress_callback(folder, pct,
+                              f"[{idx}/{total}] 已切帧：{video_name}")
+
+    # 切帧完成后发 50%
     if progress_callback:
         progress_callback(folder, 50, f"切帧完成，共{total}个视频。")
 
@@ -95,7 +115,7 @@ def save_embeddings_per_video(embs_dir, vids, embs):
 
 def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
                             config_path=CONFIG_PATH, ckpt_path=CKPT_PATH, device_str="cuda",
-                            batch_size=8, save_interval=100, num_workers=8, progress_callback=None):
+                            batch_size=8, save_interval=100, num_workers=8, progress_callback=None, origin_folder=None):
     base_args = parser.parse_args([])
     base_args.config = config_path
     cfg = parse_with_config(base_args)
@@ -112,13 +132,14 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
         processed = set(json.load(open(processed_json)))
     to_process = [v for v in all_vids if v not in processed]
     total = len(to_process)
-    frames_dir_norm = normalize(str(frames_dir))
+    # 关键：始终用原始目录做 progress_callback 的 key
+    folder_for_callback = normalize(origin_folder if origin_folder is not None else str(frames_dir))
     if not to_process:
         if progress_callback:
-            progress_callback(frames_dir_norm, 100, "所有视频已处理，无需重复处理。")
+            progress_callback(folder_for_callback, 100, "所有视频已处理，无需重复处理。")
         return
     if progress_callback:
-        progress_callback(frames_dir_norm, 50, f"开始特征提取，共{total}个视频...")
+        progress_callback(folder_for_callback, 50, f"开始特征提取，共{total}个视频...")
 
     clip_sd = CLIP.get_config(pretrained_clip_name=cfg.clip_backbone)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -170,7 +191,7 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
                     processed_count += 1
                     if progress_callback:
                         percent = 50 + int((processed_count / total) * 50)
-                        progress_callback(frames_dir_norm, percent, f"[{processed_count}/{total}] 特征提取中（无帧跳过: {vid}）")
+                        progress_callback(folder_for_callback, percent, f"[{processed_count}/{total}] 特征提取中（无帧跳过: {vid}）")
                 else:
                     vids_batch.append(vid)
                     frames_batch.append(frames)
@@ -192,7 +213,7 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
                     processed_count += 1
                     if progress_callback:
                         percent = 50 + int((processed_count / total) * 50)
-                        progress_callback(frames_dir_norm, percent, f"[{processed_count}/{total}] 特征提取中: {vid}")
+                        progress_callback(folder_for_callback, percent, f"[{processed_count}/{total}] 特征提取中: {vid}")
 
             if save_cnt >= save_interval:
                 ids, embs = zip(*all_pairs)
@@ -207,7 +228,8 @@ def preprocess_frames_folder(frames_dir, output_ids, processed_json, embs_dir,
             save_embeddings_per_video(embs_dir, ids, embs)
             json.dump(list(processed), open(processed_json, 'w'))
     if progress_callback:
-        progress_callback(frames_dir_norm, 100, f"特征提取完成，共{len(all_pairs)}个视频。")
+        progress_callback(folder_for_callback, 100, f"特征提取完成，共{len(all_pairs)}个视频。")
+
 def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, device="cuda", progress_callback=None):
     dictory_addr = os.path.abspath(dictory_addr)
     dir_name = os.path.basename(dictory_addr.rstrip("/\\"))
@@ -217,14 +239,15 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
     os.makedirs(frame_dir, exist_ok=True)
     os.makedirs(embs_dir, exist_ok=True)
 
+    folder_for_callback = normalize(dictory_addr)
     if progress_callback:
-        progress_callback(dictory_addr, 0, "上传初始化...")
+        progress_callback(folder_for_callback, 0, "上传初始化...")
 
     try:
-        extract_frames_for_dir(dictory_addr, frame_dir, progress_callback=progress_callback)
+        extract_frames_for_dir(dictory_addr, frame_dir, progress_callback=progress_callback, origin_folder=dictory_addr)
     except Exception as e:
         if progress_callback:
-            progress_callback(dictory_addr, 100, f"上传失败：视频切帧出错 - {str(e)}")
+            progress_callback(folder_for_callback, 100, f"上传失败：视频切帧出错 - {str(e)}")
         return {"success": False, "msg": f"上传失败：视频切帧出错 - {str(e)}"}
 
     output_ids = os.path.join(embs_dir, "video_ids.json")
@@ -237,10 +260,11 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
             embs_dir,
             device_str=device,
             progress_callback=progress_callback,
+            origin_folder=dictory_addr,  # 新增参数
         )
     except Exception as e:
         if progress_callback:
-            progress_callback(dictory_addr, 100, f"上传失败：特征提取出错 - {str(e)}")
+            progress_callback(folder_for_callback, 100, f"上传失败：特征提取出错 - {str(e)}")
         return {"success": False, "msg": f"上传失败：特征提取出错 - {str(e)}"}
 
     user_data_dir = os.path.join(os.path.dirname(__file__), "..", "app", "user_data")
@@ -267,7 +291,7 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
             emb_files[vid] = emb_path
 
     if progress_callback:
-        progress_callback(dictory_addr, 100, f"目录 {dictory_addr} 中的视频已全部处理完毕。")
+        progress_callback(folder_for_callback, 100, f"目录 {dictory_addr} 中的视频已全部处理完毕。")
 
     return {
         "frame_dir": frame_dir,

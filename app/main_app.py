@@ -389,7 +389,6 @@ class MainWindow(QMainWindow):
         self.progress_monitor = None  # 进度监控窗口
         self.search_thread = None  # 搜索线程
         self.searching_dialog = None  # 搜索提示弹窗
-        self.processed_dialog = None #处理提示弹窗
 
         # 确保图标存在
         self._ensure_icons_exist()
@@ -991,14 +990,25 @@ class MainWindow(QMainWindow):
                 print(f"加载历史记录失败: {e}")
 
     def filter_history(self, text):
-        """过滤历史记录"""
         for i in range(self.history_list.count()):
             item = self.history_list.item(i)
-            item.setHidden(text.lower() not in item.text().lower())
+            display_text = item.text()
+            item.setHidden(text.lower() not in display_text.lower())
 
     def open_history_item(self, item):
-        """打开历史记录项"""
-        QMessageBox.information(self, "历史记录", f"你双击了: {item.text()}")
+        """打开历史记录项，自动切换到搜索页并搜索"""
+        history_data = item.data(Qt.UserRole)
+        if isinstance(history_data, dict):
+            keyword = history_data.get("keyword", "")
+            dirs = history_data.get("dirs", [])
+        else:
+            keyword = item.text()
+            dirs = []
+        self.show_main()
+        self.input_text.setText(keyword)
+        if dirs:
+            self.selected_search_dirs = dirs
+        self.table_files.setRowCount(0)
 
     def show_main(self):
         self.stacked_widget.setCurrentWidget(self.main_page)
@@ -1013,10 +1023,62 @@ class MainWindow(QMainWindow):
         self.btn_history.setChecked(False)
 
     def show_history(self):
+        self.load_history()
         self.stacked_widget.setCurrentWidget(self.history_page)
         self.btn_main.setChecked(False)
         self.btn_settings.setChecked(False)
         self.btn_history.setChecked(True)
+
+    def save_history(self, text):
+        try:
+            if not text.strip():
+                return
+            # 保存关键词和当前范围
+            history_item = {
+                "keyword": text.strip(),
+                "dirs": self.selected_search_dirs.copy() if hasattr(self, "selected_search_dirs") else []
+            }
+            history = []
+            if os.path.exists(HISTORY_FILE):
+                try:
+                    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                        history = json.load(f)
+                        if not isinstance(history, list):
+                            history = []
+                except Exception:
+                    history = []
+            # 避免重复（只要keyword和dirs都一样才算重复）
+            history = [h for h in history if
+                       not (h.get("keyword") == history_item["keyword"] and h.get("dirs") == history_item["dirs"])]
+            history.insert(0, history_item)
+            history = history[:100]
+            dir_path = os.path.dirname(HISTORY_FILE)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            QMessageBox.critical(self, "保存历史失败", str(e))
+            print("save_history异常", e)
+
+    def load_history(self):
+        self.history_list.clear()
+        if os.path.exists(HISTORY_FILE):
+            try:
+                with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+                    if not isinstance(history, list):
+                        history = []
+                    for item in history:
+                        if isinstance(item, dict):
+                            display_text = item.get("keyword", "")
+                        else:
+                            display_text = str(item)
+                        list_item = QListWidgetItem(display_text)
+                        list_item.setData(Qt.UserRole, item)  # 把原始数据存起来
+                        self.history_list.addItem(list_item)
+            except Exception as e:
+                print(f"加载历史记录失败: {e}")
 
     def choose_settings_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
@@ -1036,15 +1098,12 @@ class MainWindow(QMainWindow):
         dlg = SelectDirDialog(self.processed_dirs, self)
         if dlg.exec_():
             self.selected_search_dirs = dlg.get_selected_dirs()
-            print(self.selected_search_dirs)
-            # 这里调用预处理函数
-            # ---------------------------------------
+            # 调用处理接口
+
             time.sleep(3)
             QMessageBox.information(self, "处理成功", f"已处理文件夹: {', '.join(self.selected_search_dirs)}")
 
-            # --------------------------------------------
             QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
-
 
     def start_upload_task(self, folder):
         folder = normalize(folder)  # 保证一致
@@ -1074,6 +1133,17 @@ class MainWindow(QMainWindow):
             self.progress_monitor.complete_task(folder, result)
 
     def do_search(self):
+        # 检查“保存历史记录”选项是否勾选
+        save_history_checked = False
+        # 你 settings_page 里的 QCheckBox 变量是 save_history
+        for box in self.settings_page.findChildren(QCheckBox):
+            if "保存搜索历史记录" in box.text():
+                save_history_checked = box.isChecked()
+                break
+
+        if save_history_checked:
+            self.save_history(self.input_text.text().strip())
+
         search_text = self.input_text.text().strip()
         if not search_text:
             QMessageBox.warning(self, "提示", "请输入搜索内容")
@@ -1112,7 +1182,7 @@ class MainWindow(QMainWindow):
         if not processed_results:
             QMessageBox.warning(self, "提示", "搜索结果为空或格式错误")
             return
-        self.all_results = processed_results
+        self.all_results = processed_results[:30]
         self.current_page = 1
         self.total_pages = (len(self.all_results) + self.page_size - 1) // self.page_size
         self.update_pagination()
