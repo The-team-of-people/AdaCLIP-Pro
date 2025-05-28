@@ -19,7 +19,8 @@ from resources.stylesheet import get_modern_style, get_nav_button_style
 # 引入接口
 from api.adaclip_api import (
     uploadDirectory, videoQuery, scanAndCheckDictory,
-    addVideoToDictory, deleteVideo
+    addVideoToDictory, deleteVideo, load_video_search_assets,
+    cached_video_query
 )
 
 BASE_DIR = os.path.dirname(__file__)  # 获取当前脚本所在目录
@@ -238,7 +239,7 @@ class SearchThread(QThread):
         try:
             self.status_update.emit("正在搜索...")
             # 调用API进行视频搜索
-            api_results = videoQuery(self.search_dirs, self.search_text)
+            api_results = cached_video_query(self.search_text)
             self.search_complete.emit(api_results)
         except Exception as e:
             self.status_update.emit(f"搜索失败: {str(e)}")
@@ -1099,11 +1100,13 @@ class MainWindow(QMainWindow):
         if dlg.exec_():
             self.selected_search_dirs = dlg.get_selected_dirs()
             # 调用处理接口
+            try:
+                load_video_search_assets(self.selected_search_dirs)
+                QMessageBox.information(self, "处理成功", f"已处理文件夹: {', '.join(self.selected_search_dirs)}")
 
-            time.sleep(3)
-            QMessageBox.information(self, "处理成功", f"已处理文件夹: {', '.join(self.selected_search_dirs)}")
-
-            QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
+                QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
+            except Exception as e:
+                print(f"处理错误：{e}")
 
     def start_upload_task(self, folder):
         folder = normalize(folder)  # 保证一致

@@ -474,6 +474,7 @@ def cached_video_query(message, topk=None):
         if abs_path is not None:
             video_addrs.append(abs_path)
     return video_addrs
+
 def scanAndCheckDictory(dictory_addrs=None):
     """
     扫描并检查上传目录列表的状态（预处理文件与视频实际存在性）。
