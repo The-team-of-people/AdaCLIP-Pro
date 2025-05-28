@@ -1028,10 +1028,13 @@ class MainWindow(QMainWindow):
             self.start_upload_task(folder)
 
     def select_search_dirs(self):
-        folders = QFileDialog.getExistingDirectory(self, "选择文件夹")
-        if folders:
-            self.selected_search_dirs.append(folders)
-            QMessageBox.information(self, "选择成功", f"已选择文件夹: {folders}")
+        if not self.processed_dirs:
+            QMessageBox.warning(self, "提示", "请先上传并处理文件夹！")
+            return
+        dlg = SelectDirDialog(self.processed_dirs, self)
+        if dlg.exec_():
+            self.selected_search_dirs = dlg.get_selected_dirs()
+            QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
 
     def start_upload_task(self, folder):
         if folder in self.upload_threads:
@@ -1125,6 +1128,34 @@ class MainWindow(QMainWindow):
             file_path = os.path.join(self.selected_search_dirs[0], file_name)
             open_path(file_path)
 
+class SelectDirDialog(QDialog):
+    def __init__(self, dirs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择搜索范围文件夹")
+        self.setMinimumWidth(400)
+        layout = QVBoxLayout(self)
+        self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.NoSelection)  # 只用复选框
+        for d in dirs:
+            item = QListWidgetItem(d)
+            item.setCheckState(Qt.Unchecked)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("确定")
+        btn_cancel = QPushButton("取消")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def get_selected_dirs(self):
+        return [self.list_widget.item(i).text()
+                for i in range(self.list_widget.count())
+                if self.list_widget.item(i).checkState() == Qt.Checked]
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
