@@ -302,6 +302,34 @@ def uploadDirectory(dictory_addr, frame_root=None, embs_root=EMBS_OUTPUT_ROOT, d
         "success": True,
         "msg": f"目录 {dictory_addr} 中的视频已经预处理完毕。"
     }
+import os
+import json
+import numpy as np
+import torch
+from modeling.model import AdaCLIP
+from modeling.clip_model import CLIP
+from configs.config import parser, parse_with_config
+from modeling.simple_tokenizer import SimpleTokenizer
+
+# 全局缓存对象
+class VideoSearchCache:
+    def __init__(self):
+        self.model = None
+        self.cfg = None
+        self.device = None
+        self.all_video_ids = []
+        self.all_embs = None
+        self.all_id_to_path = {}
+
+    def is_ready(self):
+        return (self.model is not None and
+                self.cfg is not None and
+                self.device is not None and
+                self.all_embs is not None and
+                len(self.all_video_ids) > 0)
+
+VIDEO_SEARCH_CACHE = VideoSearchCache()
+
 def load_per_video_embs(embs_dir):
     """
     加载 embs_dir 下所有视频的 embedding。返回 (video_id_list, embs_array, video_path_dict)
@@ -324,29 +352,16 @@ def load_per_video_embs(embs_dir):
             raise FileNotFoundError(f"embedding文件不存在: {emb_path}")
         emb = np.load(emb_path)
         embs.append(emb)
-        # 真实视频（原文件）路径——假设原始目录保存在 user_data/uploaded_dictory.json
-        # 这里假定视频名和原始视频名一致，否则可传递绝对路径映射
-        # 用帧推断原始目录
-        # 建议：你可以在 embedding 预处理时，把原始绝对路径存到一个 json 里做映射
-        # 这里假定帧目录为 FRAMES_ROOT/目录名/vid，原视频为上传目录/vid + .mp4等
-        # 实际更好做法：上传时存下完整原始视频绝对路径列表到 embs_dir/video_abs_paths.json
-        # 这里用一种通用的推测方式（如需更稳妥请用映射表）
         video_path_dict[vid] = None  # 这里留空，由外部补全
     embs = np.stack(embs, axis=0)
     return video_ids, embs, video_path_dict
 
-def videoQuery(dictory_addrs, message, device="cuda"):
+def load_video_search_assets(dictory_addrs, device="cuda"):
     """
-    dictory_addrs: 已上传目录（绝对路径组成的list），如 [".../my_videos", ".../sports"]
-    message: 用户输入文本
-    返回：全部视频真实绝对路径合集（按与文本相似度降序排序，list）
+    加载模型和全部embedding到内存，device可以是"cuda"或"cpu"
     """
-    # 读取 user_data/uploaded_dictory.json 建立 {上传目录: [原视频绝对路径]} 映射
-    # 若每个上传目录下有 embs_dir/video_abs_paths.json 用它更好
     user_data_dir = os.path.join(os.path.dirname(__file__), "..", "app", "user_data")
-    history_path = os.path.join(user_data_dir, "uploaded_dictory.json")
-    video_abs_paths_map = {}  # {目录名: {vid: abs_path}}
-    # 建议：上传时顺带存一份 embs_dir/video_abs_paths.json
+    video_abs_paths_map = {}
     for dir_addr in dictory_addrs:
         dir_name = os.path.basename(dir_addr.rstrip("/\\"))
         abs_map_path = os.path.join(EMBS_OUTPUT_ROOT, dir_name, "video_abs_paths.json")
@@ -354,7 +369,6 @@ def videoQuery(dictory_addrs, message, device="cuda"):
             with open(abs_map_path, "r", encoding="utf-8") as f:
                 video_abs_paths_map[dir_name] = json.load(f)
         else:
-            # fallback: 尝试用上传目录下查找
             video_abs_paths_map[dir_name] = {}
             for ext in [".mp4", ".mkv", ".webm", ".avi", ".mov"]:
                 for f in os.listdir(dir_addr):
@@ -379,8 +393,6 @@ def videoQuery(dictory_addrs, message, device="cuda"):
             if abs_path is not None:
                 all_id_to_path[f"{dir_name}:{vid}"] = abs_path
             else:
-                # fallback：帧目录/上传目录猜测
-                # 不推荐，仅做兜底
                 guessed_path = None
                 for ext in [".mp4", ".mkv", ".webm", ".avi", ".mov"]:
                     p = os.path.join(dir_addr, vid + ext)
@@ -391,11 +403,10 @@ def videoQuery(dictory_addrs, message, device="cuda"):
                     all_id_to_path[f"{dir_name}:{vid}"] = guessed_path
 
     if not all_embs:
-        return []
+        raise RuntimeError("未找到任何embedding数据。")
     all_embs = np.concatenate(all_embs, axis=0)
 
-    # 2. 文本转embedding
-    base_dir = dictory_addrs[0]
+    # ---- 加载模型 ----
     config_path = CONFIG_PATH
     ckpt_path = CKPT_PATH
     base_args = parser.parse_args([])
@@ -413,8 +424,32 @@ def videoQuery(dictory_addrs, message, device="cuda"):
     if device_obj.type == "cpu":
         model.float()
     model.eval()
+
+    # ---- 写入全局缓存 ----
+    VIDEO_SEARCH_CACHE.model = model
+    VIDEO_SEARCH_CACHE.cfg = cfg
+    VIDEO_SEARCH_CACHE.device = device_obj
+    VIDEO_SEARCH_CACHE.all_video_ids = all_video_ids
+    VIDEO_SEARCH_CACHE.all_embs = all_embs
+    VIDEO_SEARCH_CACHE.all_id_to_path = all_id_to_path
+
+def cached_video_query(message, topk=None):
+    """
+    用内存中的热数据做检索，返回按相似度排序的绝对路径list
+    """
+    cache = VIDEO_SEARCH_CACHE
+    if not cache.is_ready():
+        raise RuntimeError("模型和embedding尚未加载，请先调用load_video_search_assets()")
+
+    model = cache.model
+    cfg = cache.cfg
+    device_obj = cache.device
+    all_video_ids = cache.all_video_ids
+    all_embs = cache.all_embs
+    all_id_to_path = cache.all_id_to_path
+
+    # 文本转embedding
     tokenizer = SimpleTokenizer()
-    # 编码文本
     tokens = tokenizer.encode(message)
     tokens = tokens[:cfg.max_txt_len]
     tokens_tensor = torch.zeros((1, cfg.max_txt_len), dtype=torch.int64)
@@ -428,17 +463,17 @@ def videoQuery(dictory_addrs, message, device="cuda"):
             text_feat = text_feat[0]
         text_feat = text_feat.cpu().numpy().reshape(-1)
 
-    # 3. 检索
+    # 检索
     sims = np.dot(all_embs, text_feat) / (np.linalg.norm(all_embs, axis=1) * np.linalg.norm(text_feat) + 1e-8)
     idx_sorted = np.argsort(-sims)
-    # 返还全部视频真实绝对路径（按相似度排序）
+    if topk:
+        idx_sorted = idx_sorted[:topk]
     video_addrs = []
     for idx in idx_sorted:
         abs_path = all_id_to_path.get(all_video_ids[idx], None)
         if abs_path is not None:
             video_addrs.append(abs_path)
     return video_addrs
-
 def scanAndCheckDictory(dictory_addrs=None):
     """
     扫描并检查上传目录列表的状态（预处理文件与视频实际存在性）。
