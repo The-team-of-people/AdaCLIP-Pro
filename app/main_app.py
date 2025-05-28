@@ -310,7 +310,7 @@ class ProgressMonitor(QDialog):
         self.layout.addLayout(btn_layout)
 
     def add_task(self, folder):
-        # 为每个任务创建一个分组框
+        folder = normalize(folder)  # 修正1：所有key都标准化
         group_box = QGroupBox(f"处理: {os.path.basename(folder)}")
         group_box.setStyleSheet("QGroupBox { border: 1px solid #ddd; border-radius: 5px; margin-top: 10px; }")
 
@@ -348,7 +348,7 @@ class ProgressMonitor(QDialog):
         self.show()
 
     def update_progress(self, folder, progress, status):
-        folder = normalize(folder)
+        folder = normalize(folder)  # 修正2
         print(f"[DEBUG] update_progress 收到: {folder=} {progress=} {status=}")
         if folder in self.task_widgets:
             self.task_widgets[folder]["progress_bar"].setValue(progress)
@@ -356,7 +356,7 @@ class ProgressMonitor(QDialog):
             QApplication.processEvents()  # 关键：强制刷新UI
 
     def complete_task(self, folder, result):
-        folder = normalize(folder)
+        folder = normalize(folder)  # 修正3
         if folder in self.task_widgets:
             self.task_widgets[folder]["status_label"].setText(f"✓ {result}")
             self.task_widgets[folder]["progress_bar"].setValue(100)
@@ -1037,6 +1037,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
 
     def start_upload_task(self, folder):
+        folder = normalize(folder)  # 保证一致
         if folder in self.upload_threads:
             QMessageBox.warning(self, "提示", "该文件夹正在处理，请勿重复添加")
             return
@@ -1085,7 +1086,23 @@ class MainWindow(QMainWindow):
 
     def display_search_results(self, results):
         self.searching_dialog.close()
-        self.all_results = results
+        processed_results = []
+        # 兼容两种情况：一是已经是dict（有name等字段），一是字符串路径
+        for r in results:
+            if isinstance(r, dict) and "name" in r and "size" in r and "modified" in r:
+                processed_results.append(r)
+            elif isinstance(r, str) and os.path.exists(r):
+                file_stat = os.stat(r)
+                processed_results.append({
+                    "name": os.path.basename(r),
+                    "size": f"{file_stat.st_size / (1024 * 1024):.2f}MB",
+                    "modified": datetime.fromtimestamp(file_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "path": r
+                })
+        if not processed_results:
+            QMessageBox.warning(self, "提示", "搜索结果为空或格式错误")
+            return
+        self.all_results = processed_results
         self.current_page = 1
         self.total_pages = (len(self.all_results) + self.page_size - 1) // self.page_size
         self.update_pagination()
