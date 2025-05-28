@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import time
 import traceback
 from datetime import datetime
 
@@ -1097,6 +1098,11 @@ class MainWindow(QMainWindow):
         dlg = SelectDirDialog(self.processed_dirs, self)
         if dlg.exec_():
             self.selected_search_dirs = dlg.get_selected_dirs()
+            # 调用处理接口
+
+            time.sleep(3)
+            QMessageBox.information(self, "处理成功", f"已处理文件夹: {', '.join(self.selected_search_dirs)}")
+
             QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
 
     def start_upload_task(self, folder):
