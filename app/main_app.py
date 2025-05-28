@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import time
 import traceback
 from datetime import datetime
 
@@ -388,6 +389,7 @@ class MainWindow(QMainWindow):
         self.progress_monitor = None  # 进度监控窗口
         self.search_thread = None  # 搜索线程
         self.searching_dialog = None  # 搜索提示弹窗
+        self.processed_dialog = None #处理提示弹窗
 
         # 确保图标存在
         self._ensure_icons_exist()
@@ -1034,7 +1036,15 @@ class MainWindow(QMainWindow):
         dlg = SelectDirDialog(self.processed_dirs, self)
         if dlg.exec_():
             self.selected_search_dirs = dlg.get_selected_dirs()
+            print(self.selected_search_dirs)
+            # 这里调用预处理函数
+            # ---------------------------------------
+            time.sleep(3)
+            QMessageBox.information(self, "处理成功", f"已处理文件夹: {', '.join(self.selected_search_dirs)}")
+
+            # --------------------------------------------
             QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
+
 
     def start_upload_task(self, folder):
         folder = normalize(folder)  # 保证一致
