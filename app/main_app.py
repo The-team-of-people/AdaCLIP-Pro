@@ -18,7 +18,7 @@ from icon_and_font_updates import IconManager
 from resources.stylesheet import get_modern_style, get_nav_button_style
 # 引入接口
 from api.adaclip_api import (
-    uploadDirectory, videoQuery, scanAndCheckDictory,
+    uploadDirectory,  scanAndCheckDictory,
     addVideoToDictory, deleteVideo, load_video_search_assets,
     cached_video_query
 )
@@ -226,6 +226,94 @@ def open_path(path):
     except Exception as e:
         QMessageBox.warning(None, "错误", f"打开失败: {str(e)}")
 
+class ProcessingDialog(QDialog):
+    """合并的处理对话框，显示处理状态并允许更新"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("处理中")
+        self.setFixedSize(350, 180)
+        self.setWindowModality(Qt.ApplicationModal)  # 阻塞主窗口
+
+        layout = QVBoxLayout(self)
+
+        # 状态图标
+        self.status_icon = QLabel()
+        self.status_icon.setAlignment(Qt.AlignCenter)
+        self.status_icon.setFixedSize(48, 48)
+
+        # 状态文本
+        self.status_text = QLabel("准备处理...")
+        self.status_text.setAlignment(Qt.AlignCenter)
+        self.status_text.setStyleSheet("font-size: 16px; font-weight: bold;")
+
+        # 详细信息文本
+        self.detail_text = QLabel()
+        self.detail_text.setAlignment(Qt.AlignCenter)
+        self.detail_text.setWordWrap(True)
+        self.detail_text.setStyleSheet("color: #6c757d; margin-top: 10px;")
+
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)  # 不确定模式
+        self.progress_bar.setTextVisible(False)
+
+        # 按钮区域
+        self.btn_layout = QHBoxLayout()
+        self.btn_ok = QPushButton("确定")
+        self.btn_ok.setEnabled(False)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_layout.addStretch()
+        self.btn_layout.addWidget(self.btn_ok)
+        self.btn_layout.addStretch()
+
+        layout.addWidget(self.status_icon, 0, Qt.AlignCenter)
+        layout.addWidget(self.status_text, 0, Qt.AlignCenter)
+        layout.addWidget(self.detail_text, 0, Qt.AlignCenter)
+        layout.addWidget(self.progress_bar)
+        layout.addLayout(self.btn_layout)
+
+        # 初始状态为处理中
+        self.set_processing_state()
+
+    def set_processing_state(self, message="处理中..."):
+        """设置为处理中状态"""
+        self.status_text.setText(message)
+        self.status_text.setStyleSheet("font-size: 16px; font-weight: bold; color: #0d6efd;")
+        self.progress_bar.setRange(0, 0)  # 不确定模式
+        self.btn_ok.setEnabled(False)
+        self.btn_ok.hide()
+
+    def set_success_state(self, message, detail=None):
+        """设置为成功状态"""
+        self.status_text.setText(message)
+        self.status_text.setStyleSheet("font-size: 16px; font-weight: bold; color: #198754;")
+
+        if detail:
+            self.detail_text.setText(detail)
+            self.detail_text.show()
+        else:
+            self.detail_text.hide()
+
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        self.btn_ok.setEnabled(True)
+        self.btn_ok.show()
+
+    def set_error_state(self, message):
+        """设置为错误状态"""
+        self.status_text.setText(f"处理失败")
+        self.status_text.setStyleSheet("font-size: 16px; font-weight: bold; color: #dc3545;")
+
+        self.detail_text.setText(message)
+        self.detail_text.show()
+
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.btn_ok.setEnabled(True)
+        self.btn_ok.show()
+
+
 class SearchThread(QThread):
     search_complete = pyqtSignal(list)  # 发送搜索结果
     status_update = pyqtSignal(str)     # 发送状态更新
@@ -297,7 +385,7 @@ class ProgressMonitor(QDialog):
         self.setWindowTitle("上传进度监控")
         self.setMinimumWidth(600)
         self.setStyleSheet(get_modern_style())
-        self.setWindowIcon(parent.icon_manager.get_icon())  # 设置对话框图标
+        self.setWindowIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "app.png")))
 
         self.layout = QVBoxLayout(self)
         self.task_widgets = {}  # 存储每个任务的UI组件
@@ -382,7 +470,7 @@ class MainWindow(QMainWindow):
         self.icon_manager = IconManager()
 
         self.setWindowTitle("文影灵搜")
-        self.setWindowIcon(self.icon_manager.get_icon())
+        self.setWindowIcon(QIcon(os.path.join(BASE_DIR, "resources", "icons", "app.png")))
         self.resize(1200, 800)  # 适当增大默认窗口尺寸
         self.selected_search_dirs = []
         self.processed_dirs = []
@@ -415,7 +503,9 @@ class MainWindow(QMainWindow):
         # 应用名称和logo
         logo_layout = QHBoxLayout()
         app_icon = QLabel()
-        app_icon.setPixmap(self.icon_manager.get_icon().pixmap(32, 32))
+        app_icon.setPixmap(
+            QPixmap(os.path.join(BASE_DIR, "resources", "icons", "app.png")).scaled(32, 32, Qt.KeepAspectRatio,
+                                                                                    Qt.SmoothTransformation))
         app_icon.setAlignment(Qt.AlignCenter)
         app_icon.setStyleSheet("background-color: transparent;")
 
@@ -1096,17 +1186,30 @@ class MainWindow(QMainWindow):
         if not self.processed_dirs:
             QMessageBox.warning(self, "提示", "请先上传并处理文件夹！")
             return
+
         dlg = SelectDirDialog(self.processed_dirs, self)
         if dlg.exec_():
             self.selected_search_dirs = dlg.get_selected_dirs()
-            # 调用处理接口
-            try:
-                load_video_search_assets(self.selected_search_dirs)
-                QMessageBox.information(self, "处理成功", f"已处理文件夹: {', '.join(self.selected_search_dirs)}")
+            if not self.selected_search_dirs:
+                QMessageBox.warning(self, "提示", "未选择任何文件夹")
+                return
 
-                QMessageBox.information(self, "选择成功", f"已选择文件夹: {', '.join(self.selected_search_dirs)}")
+            # 创建并显示处理对话框
+            processing_dialog = ProcessingDialog(self)
+            processing_dialog.set_processing_state("正在预处理视频资源...")
+            processing_dialog.show()
+
+            try:
+                # 执行预处理操作（这会阻塞UI，但对话框仍会显示）
+                load_video_search_assets(self.selected_search_dirs)
+                # 更新对话框为成功状态
+                processing_dialog.set_success_state(
+                    "处理成功"
+                )
+
             except Exception as e:
-                print(f"处理错误：{e}")
+                # 显示错误信息
+                processing_dialog.set_error_state(str(e))
 
     def start_upload_task(self, folder):
         folder = normalize(folder)  # 保证一致
